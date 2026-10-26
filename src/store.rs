@@ -1,6 +1,8 @@
-//! Small on-disk state: remembered settings, listening history and saved mixes.
+//! Small on-disk state: remembered settings, listening history, saved
+//! mixes, and what your friends liked.
 
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -28,6 +30,38 @@ impl Default for Settings {
     }
 }
 
+/// What you change in `/settings`. Anything left unset falls back to `.env`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefs {
+    /// The channel the panel always goes to, instead of wherever `/play` was used.
+    pub panel_channel: Option<u64>,
+    /// The slim panel, without the artwork.
+    pub compact: bool,
+    /// How long Loski waits after you leave the call.
+    pub leave_after_secs: Option<u64>,
+    /// How long Loski waits after the music ends.
+    pub idle_leave_secs: Option<u64>,
+    /// In kbps; 0 means the best the server allows.
+    pub bitrate_kbps: Option<u32>,
+    pub timezone: Option<String>,
+    pub requests_off: bool,
+    /// "My sound": decibels for bass, low-mid, mid, high-mid and treble.
+    pub eq: [i8; 5],
+    /// 24/7: stay in voice and keep the music going.
+    pub always_on: bool,
+    /// Where 24/7 keeps Loski (guild, channel), so it can come back after a
+    /// restart. Cleared by `/stop` until the next `/play`.
+    pub stay_in: Option<(u64, u64)>,
+    /// Co-DJs picked by name (Discord user ids).
+    pub co_djs: Vec<u64>,
+    /// Everyone with this role is a co-DJ too.
+    pub dj_role: Option<u64>,
+    /// Co-DJs can add songs, but not control playback.
+    pub djs_queue_only: bool,
+    pub vote_skip_off: bool,
+}
+
 /// One song you listened to. Entries from before listening time was
 /// tracked only have the first four fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +79,12 @@ pub struct HistoryEntry {
     /// How long you actually listened (pauses don't count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listened_ms: Option<u64>,
+    /// Friends in the call while it played (Discord user ids).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<u64>,
+    /// The friend who asked for it with /request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<u64>,
 }
 
 impl HistoryEntry {
@@ -60,6 +100,19 @@ impl HistoryEntry {
             self.artist_list.iter().map(String::as_str).collect()
         }
     }
+}
+
+/// Someone pressed the heart on the panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Like {
+    pub at: i64,
+    pub uri: String,
+    pub title: String,
+    pub artists: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    /// Who liked it (a Discord user id).
+    pub by: u64,
 }
 
 /// A queue saved with `/mix save`.
@@ -114,6 +167,21 @@ impl Store {
         let json = serde_json::to_string_pretty(settings).expect("settings serialize");
         if let Err(e) = write_atomic(&self.dir.join("settings.json"), json.as_bytes()) {
             tracing::warn!("could not save settings: {e}");
+        }
+    }
+
+    pub fn load_prefs(&self) -> Prefs {
+        fs::read_to_string(self.dir.join("preferences.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_prefs(&self, prefs: &Prefs) {
+        let _guard = self.write_lock.lock();
+        let json = serde_json::to_string_pretty(prefs).expect("prefs serialize");
+        if let Err(e) = write_atomic(&self.dir.join("preferences.json"), json.as_bytes()) {
+            tracing::warn!("could not save your settings: {e}");
         }
     }
 
@@ -175,6 +243,49 @@ impl Store {
         let _guard = self.write_lock.lock();
         let json = serde_json::to_string_pretty(mixes).expect("mixes serialize");
         write_atomic(&self.dir.join("mixes.json"), json.as_bytes())
+    }
+
+    pub fn append_likes(&self, likes: &[Like]) {
+        let _guard = self.write_lock.lock();
+        let mut text = String::new();
+        for like in likes {
+            text.push_str(&serde_json::to_string(like).expect("like serialize"));
+            text.push('\n');
+        }
+        let result = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join("likes.jsonl"))
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        if let Err(e) = result {
+            tracing::warn!("could not save likes: {e}");
+        }
+    }
+
+    /// Everything anyone liked, oldest first.
+    pub fn all_likes(&self) -> Vec<Like> {
+        let Ok(text) = fs::read_to_string(self.dir.join("likes.jsonl")) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    /// The names your friends had when Loski last saw them, by user id.
+    pub fn load_names(&self) -> HashMap<u64, String> {
+        fs::read_to_string(self.dir.join("friends.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_names(&self, names: &HashMap<u64, String>) {
+        let _guard = self.write_lock.lock();
+        let json = serde_json::to_string_pretty(names).expect("names serialize");
+        if let Err(e) = write_atomic(&self.dir.join("friends.json"), json.as_bytes()) {
+            tracing::warn!("could not save friends' names: {e}");
+        }
     }
 
     /// A small note-to-self file, like which monthly recap was last sent.

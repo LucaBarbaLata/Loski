@@ -8,6 +8,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use twilight_interactions::command::{
     AutocompleteValue, CommandInputData, CommandModel, CommandOption, CreateCommand, CreateOption,
+    ResolvedUser,
 };
 use twilight_model::{
     application::{
@@ -15,15 +16,19 @@ use twilight_model::{
         interaction::{Interaction, InteractionData},
     },
     channel::message::{Component, component::ButtonStyle},
-    id::{Id, marker::GuildMarker},
+    id::{
+        Id,
+        marker::{ChannelMarker, GuildMarker},
+    },
 };
 
 use super::{
     App, Core, LONG_SECS, Pick, SHORT_SECS,
     cards::{self, Btn, color},
+    components, friends,
     icons::{Icon, Icons},
     interact::Ix,
-    library, mixes, oops, panel, requests, sound, stats, status, voice,
+    library, lyrics, mixes, oops, panel, requests, settings, sound, stats, status, voice,
 };
 use crate::{
     engine::Repeat,
@@ -208,8 +213,33 @@ pub struct CrossfadeCmd {
 pub struct FollowCmd;
 
 #[derive(CommandModel, CreateCommand)]
-#[command(name = "history", desc = "What you've listened to recently")]
-pub struct HistoryCmd;
+#[command(
+    name = "history",
+    desc = "What you've listened to: recent plays, or search them"
+)]
+pub struct HistoryCmd {
+    /// Words from a song title or artist
+    #[command(max_length = 100)]
+    search: Option<String>,
+    /// How far back to look
+    when: Option<HistoryWhen>,
+    /// Songs you played with this friend in the call, or that they asked for
+    with: Option<ResolvedUser>,
+    /// Only songs friends asked for with /request
+    requests: Option<bool>,
+}
+
+#[derive(CommandOption, CreateOption)]
+pub enum HistoryWhen {
+    #[option(name = "today", value = "today")]
+    Today,
+    #[option(name = "the last 7 days", value = "week")]
+    Week,
+    #[option(name = "the last 30 days", value = "month")]
+    Month,
+    #[option(name = "the last year", value = "year")]
+    Year,
+}
 
 #[derive(CommandModel, CreateCommand)]
 #[command(
@@ -255,6 +285,9 @@ pub(super) fn definitions() -> Vec<Command> {
         mixes::MixCmd::create_command().into(),
         status::StatusCmd::create_command().into(),
         requests::RequestCmd::create_command().into(),
+        lyrics::LyricsCmd::create_command().into(),
+        settings::SettingsCmd::create_command().into(),
+        stats::WrappedCmd::create_command().into(),
     ]
     .into_iter()
     .chain(library::message_commands())
@@ -275,8 +308,8 @@ pub async fn run(app: Arc<App>, interaction: Interaction) {
     let Some(InteractionData::ApplicationCommand(data)) = interaction.data else {
         return;
     };
-    // Anyone can ask for a song; everything else is the owner's alone.
-    if !ix.is_owner() && data.name != "request" {
+    // Anyone can ask for a song; co-DJs get what you allowed them.
+    if ix.access() < friends::command_needs(&data.name) {
         let _ = ix.refuse().await;
         return;
     }
@@ -333,6 +366,9 @@ pub async fn run(app: Arc<App>, interaction: Interaction) {
         "mix" => mixes::MixCmd => mix,
         "status" => status::StatusCmd => status,
         "request" => requests::RequestCmd => request,
+        "lyrics" => lyrics::LyricsCmd => lyrics_cmd,
+        "settings" => settings::SettingsCmd => settings_cmd,
+        "wrapped" => stats::WrappedCmd => wrapped,
     };
     if let Err(e) = result {
         ix.fail(e).await;
@@ -375,17 +411,21 @@ pub async fn autocomplete(app: Arc<App>, interaction: Interaction) {
     let Some(InteractionData::ApplicationCommand(data)) = interaction.data else {
         return;
     };
-    let choices = if data.name == "request" {
-        requests::suggestions(&ix.app, CommandInputData::from(*data)).await
-    } else if !ix.is_owner() {
+    // Your recent plays are suggested to you and co-DJs only.
+    let recent = ix.access() >= friends::Access::Queue;
+    let choices = if ix.access() < friends::command_needs(&data.name) {
         Vec::new()
+    } else if data.name == "request" {
+        requests::suggestions(&ix.app, CommandInputData::from(*data)).await
     } else if data.name == "mix" {
         mixes::autocomplete(&ix.app, &data)
+    } else if data.name == "lyrics" {
+        lyrics::suggestions(&ix.app, CommandInputData::from(*data), recent).await
     } else if data.name == "play" {
         match PlayComplete::from_interaction(CommandInputData::from(*data)) {
             Ok(PlayComplete {
                 song: AutocompleteValue::Focused(partial),
-            }) => song_suggestions(&ix.app, &partial).await,
+            }) => song_suggestions(&ix.app, &partial, recent).await,
             _ => Vec::new(),
         }
     } else {
@@ -395,7 +435,13 @@ pub async fn autocomplete(app: Arc<App>, interaction: Interaction) {
     let _ = ix.autocomplete(choices).await;
 }
 
-pub(super) async fn song_suggestions(app: &App, partial: &str) -> Vec<CommandOptionChoice> {
+/// Songs matching what's typed so far; with nothing typed, your recent
+/// plays when `recent` allows.
+pub(super) async fn song_suggestions(
+    app: &App,
+    partial: &str,
+    recent: bool,
+) -> Vec<CommandOptionChoice> {
     let Some(core) = app.core.get() else {
         return vec![choice(
             "Log in to Spotify first (check your DMs)".into(),
@@ -405,6 +451,9 @@ pub(super) async fn song_suggestions(app: &App, partial: &str) -> Vec<CommandOpt
     let partial = partial.trim();
 
     if partial.is_empty() {
+        if !recent {
+            return Vec::new();
+        }
         // Nothing typed yet: offer recent plays.
         let mut seen = HashSet::new();
         return app
@@ -450,17 +499,32 @@ pub(super) fn guild(ix: &Ix) -> Result<Id<GuildMarker>> {
         .ok_or_else(|| oops("This only works in a server."))
 }
 
-pub(super) fn require_voice(ix: &Ix) -> Result<Id<GuildMarker>> {
+/// Where Loski goes to play: a voice channel in a server.
+pub type Target = (Id<GuildMarker>, Id<ChannelMarker>);
+
+/// Where Loski should play for this person: your voice channel; for a
+/// co-DJ, the channel Loski's already in, or theirs.
+pub(super) fn require_voice(ix: &Ix) -> Result<Target> {
+    let app = &ix.app;
     let guild = guild(ix)?;
-    voice::user_channel(&ix.app, guild, ix.app.owner_id())
-        .ok_or_else(|| oops(personality::join_voice_first()))?;
-    Ok(guild)
+    let channel = if ix.is_owner() {
+        voice::user_channel(app, guild, app.owner_id())
+    } else {
+        let here = app
+            .voice
+            .guild()
+            .filter(|g| *g == guild)
+            .and(app.voice.channel());
+        here.or_else(|| ix.user_id.and_then(|u| voice::user_channel(app, guild, u)))
+    };
+    let channel = channel.ok_or_else(|| oops(personality::join_voice_first()))?;
+    Ok((guild, channel))
 }
 
 async fn play(ix: &Ix, cmd: PlayCmd) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = require_voice(ix)?;
+    let target = require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
         app.ui.set_home(channel);
@@ -495,7 +559,7 @@ async fn play(ix: &Ix, cmd: PlayCmd) -> Result<()> {
 
     let note = truncated
         .then(|| format!("Only the first {MAX_TRACKS_PER_REQUEST} songs, to keep things snappy."));
-    let card = enqueue(app, &core, guild, tracks, placement, source, note).await?;
+    let card = enqueue(app, &core, target, tracks, placement, source, note).await?;
     ix.reply_temp(vec![card], SHORT_SECS).await
 }
 
@@ -672,17 +736,15 @@ pub enum Placement {
 }
 
 /// Joins the voice channel you're in (or moves there).
-pub async fn join_owner(app: &App, core: &Core, guild: Id<GuildMarker>) -> Result<()> {
-    let channel = voice::user_channel(app, guild, app.owner_id())
-        .ok_or_else(|| oops(personality::join_voice_first()))?;
+pub async fn join_target(app: &App, core: &Core, (guild, channel): Target) -> Result<()> {
     voice::join(app, core, guild, channel).await
 }
 
-/// Joins your channel, queues the songs and returns the confirmation card.
+/// Joins the channel, queues the songs and returns the confirmation card.
 pub async fn enqueue(
     app: &App,
     core: &Core,
-    guild: Id<GuildMarker>,
+    target: Target,
     tracks: Vec<TrackInfo>,
     placement: Placement,
     source: Option<String>,
@@ -691,13 +753,14 @@ pub async fn enqueue(
     if tracks.is_empty() {
         return Err(oops("None of those songs can be played here, sorry."));
     }
-    join_owner(app, core, guild).await?;
+    join_target(app, core, target).await?;
 
     let mut tracks = tracks;
     if let Some(from) = source.as_deref() {
         let from: Arc<str> = Arc::from(from);
         for track in &mut tracks {
-            track.from = Some(from.clone());
+            // A song may say already where it came from (whose request it was).
+            track.from.get_or_insert_with(|| from.clone());
         }
     }
     let count = tracks.len();
@@ -867,6 +930,7 @@ async fn skip_to(ix: &Ix, cmd: SkipToCmd) -> Result<()> {
 
 async fn remove(ix: &Ix, cmd: RemoveCmd) -> Result<()> {
     let core = ix.app.core()?;
+    let undo = core.engine.save_undo();
     let position = cmd.position.max(1) as usize;
     let text = match cmd.to.map(|to| to.max(1) as usize) {
         Some(to) if to != position => {
@@ -885,19 +949,21 @@ async fn remove(ix: &Ix, cmd: RemoveCmd) -> Result<()> {
             format!("Removed **{}**.", escape_md(&track.title))
         }
     };
-    ix.reply_temp(vec![cards::info(&ix.app.icons, &text)], SHORT_SECS)
-        .await
+    reply_undoable(ix, &text, undo).await
 }
 
 async fn dedupe(ix: &Ix, _: DedupeCmd) -> Result<()> {
     let core = ix.app.core()?;
+    let undo = core.engine.save_undo();
     let text = match core.engine.dedupe() {
-        0 => "No repeats in the queue.".to_string(),
+        0 => {
+            let card = cards::info(&ix.app.icons, "No repeats in the queue.");
+            return ix.reply_temp(vec![card], SHORT_SECS).await;
+        }
         1 => "Removed 1 song that was already in the queue.".to_string(),
         n => format!("Removed {n} songs that were already in the queue."),
     };
-    ix.reply_temp(vec![cards::info(&ix.app.icons, &text)], SHORT_SECS)
-        .await
+    reply_undoable(ix, &text, undo).await
 }
 
 async fn move_track(ix: &Ix, cmd: MoveCmd) -> Result<()> {
@@ -919,24 +985,27 @@ async fn move_track(ix: &Ix, cmd: MoveCmd) -> Result<()> {
 
 async fn clear(ix: &Ix, _: ClearCmd) -> Result<()> {
     let core = ix.app.core()?;
+    let undo = core.engine.save_undo();
     let text = match core.engine.clear() {
-        0 => "The queue was already empty.".to_string(),
+        0 => {
+            let card = cards::info(&ix.app.icons, "The queue was already empty.");
+            return ix.reply_temp(vec![card], SHORT_SECS).await;
+        }
         1 => "Cleared 1 song.".to_string(),
         n => format!("Cleared {n} songs."),
     };
-    ix.reply_temp(vec![cards::info(&ix.app.icons, &text)], SHORT_SECS)
-        .await
+    reply_undoable(ix, &text, undo).await
 }
 
 async fn shuffle(ix: &Ix, _: ShuffleCmd) -> Result<()> {
     let core = ix.app.core()?;
+    let undo = core.engine.save_undo();
     let count = core.engine.shuffle();
     if count < 2 {
         return Err(oops("Need at least two songs in the queue to shuffle."));
     }
     let text = format!("{} ({count} songs)", personality::shuffled());
-    ix.reply_temp(vec![cards::info(&ix.app.icons, &text)], SHORT_SECS)
-        .await
+    reply_undoable(ix, &text, undo).await
 }
 
 async fn repeat(ix: &Ix, cmd: RepeatCmd) -> Result<()> {
@@ -999,13 +1068,11 @@ async fn follow(ix: &Ix, _: FollowCmd) -> Result<()> {
         return ix.reply_temp(vec![card], SHORT_SECS).await;
     }
 
-    let guild = require_voice(ix)?;
+    let (guild, channel) = require_voice(ix)?;
     ix.defer().await?;
-    if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+    if let Some(home) = ix.channel_id {
+        app.ui.set_home(home);
     }
-    let channel = voice::user_channel(app, guild, app.owner_id())
-        .ok_or_else(|| oops(personality::join_voice_first()))?;
     voice::join(app, &core, guild, channel).await?;
     core.engine.set_following(true);
     panel::repost(app, &core).await;
@@ -1019,9 +1086,54 @@ async fn follow(ix: &Ix, _: FollowCmd) -> Result<()> {
     ix.reply_temp(vec![card], super::ERROR_SECS).await
 }
 
-async fn history(ix: &Ix, _: HistoryCmd) -> Result<()> {
-    let entries = ix.app.store.recent_history(panel::HISTORY_SIZE);
-    let card = panel::history_card(&ix.app.icons, ix.app.ui.color(), &entries, None);
+async fn history(ix: &Ix, cmd: HistoryCmd) -> Result<()> {
+    let app = &ix.app;
+    let now = stats::now(app);
+    let (since, when) = match cmd.when {
+        Some(HistoryWhen::Today) => (
+            now.date_naive()
+                .and_hms_opt(0, 0, 0)
+                .and_then(|midnight| midnight.and_local_timezone(now.timezone()).earliest())
+                .map(|t| t.timestamp()),
+            Some("today"),
+        ),
+        Some(HistoryWhen::Week) => (Some(now.timestamp() - 7 * 86_400), Some("the last 7 days")),
+        Some(HistoryWhen::Month) => (
+            Some(now.timestamp() - 30 * 86_400),
+            Some("the last 30 days"),
+        ),
+        Some(HistoryWhen::Year) => (Some(now.timestamp() - 365 * 86_400), Some("the last year")),
+        None => (None, None),
+    };
+    let search = cmd
+        .search
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut about = Vec::new();
+    if let Some(words) = &search {
+        about.push(format!("“{}”", escape_md(&truncate(words, 40))));
+    }
+    about.extend(when.map(str::to_string));
+    if let Some(friend) = &cmd.with {
+        let name = friend
+            .member
+            .as_ref()
+            .and_then(|m| m.nick.clone())
+            .or_else(|| friend.resolved.global_name.clone())
+            .unwrap_or_else(|| friend.resolved.name.clone());
+        about.push(format!("with **{}**", escape_md(&truncate(&name, 32))));
+    }
+    if cmd.requests == Some(true) {
+        about.push("friends' requests".to_string());
+    }
+    let filter = crate::stats::HistoryFilter {
+        search,
+        since,
+        with: cmd.with.map(|f| f.resolved.id.get()),
+        requests: cmd.requests == Some(true),
+    };
+    *app.history_view.lock() = (filter, about.join(" · "));
+    let card = components::history_card(app, None);
     ix.reply_temp(vec![card], LONG_SECS * 2).await
 }
 
@@ -1029,7 +1141,7 @@ async fn stop(ix: &Ix, _: StopCmd) -> Result<()> {
     if ix.app.voice.guild().is_none() {
         return Err(oops("I'm not in a voice channel."));
     }
-    voice::leave(&ix.app, None).await;
+    voice::send_away(&ix.app, None).await;
     let card = cards::info(&ix.app.icons, personality::goodbye());
     ix.reply_temp(vec![card], SHORT_SECS).await
 }
@@ -1056,7 +1168,7 @@ pub(super) fn help_card(icons: &Icons) -> Component {
         vec![
             cards::text(format!(
                 "{} **Loski**
-Your private Spotify DJ. Only you can control me; everyone in the call can listen.",
+Your private Spotify DJ. You control me, along with any co-DJs you pick in `/settings`; everyone in the call can listen, like songs and vote to skip.",
                 icons.md(Icon::Music)
             )),
             cards::divider(),
@@ -1101,25 +1213,31 @@ Your private Spotify DJ. Only you can control me; everyone in the call can liste
             cards::text(group(
                 "YOU",
                 &[
-                    "`/stats` listening time, top songs and artists, streaks",
-                    "`/history` recent plays, and play any of them again",
+                    "`/stats` listening time, top songs, artists and genres, streaks, and who you listen with",
+                    "`/history` recent plays, or search them by words, time or friend; play any again",
+                    "`/wrapped` your year in pictures (it also arrives on January 1st)",
+                    "Every Monday your **Blend** mix mixes your top songs with what friends liked: `/mix load name:Blend`",
                 ],
             )),
             cards::text(group(
                 "FRIENDS",
                 &[
-                    "Anyone in the server can `/request` a song. You get Play next, Add to queue or Decline.",
+                    "Anyone in the server can `/request` a song; requests wait on one card for you or a co-DJ.",
+                    "Everyone in the call can press ♥ on the panel, and Skip to vote. `/liked from:friends` plays what they liked.",
+                    "Co-DJs, by name or with a DJ role: `/settings` → Friends.",
                 ],
             )),
             cards::text(group(
                 "MORE",
                 &[
-                    "`/nowplaying` bring the panel back down · `/status` check on me · `/stop` leave the call",
+                    "`/lyrics` sing along, line by line · `/nowplaying` bring the panel back down",
+                    "`/settings` the panel, leaving, 24/7, sound and requests, in one card",
+                    "`/status` check on me · `/stop` leave the call",
                 ],
             )),
             cards::divider(),
             cards::text(
-                "-# I leave a minute after you do, and a few minutes after the queue runs out; the panel then sums up the session. On the 1st of each month I DM you a recap.",
+                "-# I leave a minute after you do, and a few minutes after the queue runs out (or stay with 24/7, in `/settings`); the panel then sums up the session. On the 1st of each month I DM you a recap.",
             ),
         ],
     )
@@ -1163,4 +1281,36 @@ async fn status(ix: &Ix, cmd: status::StatusCmd) -> Result<()> {
 
 async fn request(ix: &Ix, cmd: requests::RequestCmd) -> Result<()> {
     requests::request(ix, cmd).await
+}
+
+async fn lyrics_cmd(ix: &Ix, cmd: lyrics::LyricsCmd) -> Result<()> {
+    lyrics::lyrics(ix, cmd).await
+}
+
+async fn settings_cmd(ix: &Ix, cmd: settings::SettingsCmd) -> Result<()> {
+    settings::settings(ix, cmd).await
+}
+
+async fn wrapped(ix: &Ix, cmd: stats::WrappedCmd) -> Result<()> {
+    stats::wrapped(ix, cmd).await
+}
+
+/// How long a queue change's Undo button stays.
+const UNDO_SECS: u64 = 15;
+
+/// The confirmation for a change to the queue, with an Undo button while it lasts.
+async fn reply_undoable(ix: &Ix, text: &str, undo: u64) -> Result<()> {
+    let icons = &ix.app.icons;
+    let card = cards::card(
+        None,
+        vec![
+            cards::text(format!("{} {text}", icons.md(Icon::Info))),
+            cards::row(vec![
+                Btn::icon(&format!("loski:undo:{undo}"), Icon::Undo)
+                    .with_label("Undo")
+                    .build(icons),
+            ]),
+        ],
+    );
+    ix.reply_temp(vec![card], UNDO_SECS).await
 }

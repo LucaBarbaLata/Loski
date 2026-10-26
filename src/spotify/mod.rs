@@ -377,5 +377,6 @@ fn track_info(track: &Track) -> Option<TrackInfo> {
         // Missing dates come back as the Unix epoch.
         year: Some(track.album.date.year()).filter(|y| *y > 1900 && *y != 1970),
         from: None,
+        requested_by: None,
     })
 }

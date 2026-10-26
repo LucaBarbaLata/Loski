@@ -7,9 +7,12 @@ use std::{
 };
 
 use anyhow::Result;
+use librespot_core::{SpotifyId, SpotifyUri};
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
-use twilight_interactions::command::{AutocompleteValue, CommandModel, CreateCommand};
+use twilight_interactions::command::{
+    AutocompleteValue, CommandModel, CommandOption, CreateCommand, CreateOption,
+};
 use twilight_model::application::{
     command::{Command, CommandOptionChoice, CommandType},
     interaction::application_command::CommandData,
@@ -20,11 +23,13 @@ use super::{
     App, Core, SHORT_SECS,
     cards::{self, color},
     commands::{self, Placement},
+    friends,
     interact::Ix,
     oops,
 };
 use crate::{
-    spotify::{Lookup, library::PlaylistRef, parse_lookup},
+    spotify::{Lookup, MAX_TRACKS_PER_REQUEST, library::PlaylistRef, parse_lookup},
+    store::Store,
     track::TrackInfo,
     util::escape_md,
 };
@@ -54,6 +59,16 @@ pub struct RadioComplete {
 pub struct LikedCmd {
     /// Shuffle them (on unless you turn it off)
     shuffle: Option<bool>,
+    /// Your own Liked Songs, or the songs friends liked on the panel
+    from: Option<LikedFrom>,
+}
+
+#[derive(CommandOption, CreateOption)]
+pub enum LikedFrom {
+    #[option(name = "your Liked Songs on Spotify", value = "mine")]
+    Mine,
+    #[option(name = "songs your friends liked on the panel", value = "friends")]
+    Friends,
 }
 
 #[derive(CommandModel, CreateCommand)]
@@ -137,7 +152,7 @@ pub async fn autocomplete(app: &App, name: &str, data: CommandData) -> Vec<Comma
         "radio" => match RadioComplete::from_interaction(input) {
             Ok(RadioComplete {
                 song: AutocompleteValue::Focused(partial),
-            }) => commands::song_suggestions(app, &partial).await,
+            }) => commands::song_suggestions(app, &partial, true).await,
             _ => Vec::new(),
         },
         "playlist" => match PlaylistComplete::from_interaction(input) {
@@ -184,7 +199,7 @@ async fn radio_seed(core: &Core, song: Option<&str>) -> Result<(TrackInfo, bool)
 pub async fn radio(ix: &Ix, cmd: RadioCmd) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
         app.ui.set_home(channel);
@@ -195,7 +210,7 @@ pub async fn radio(ix: &Ix, cmd: RadioCmd) -> Result<()> {
         .radio(&seed)
         .await
         .map_err(|e| oops(format!("Hmm, {e}")))?;
-    commands::join_owner(app, &core, guild).await?;
+    commands::join_target(app, &core, target).await?;
 
     if play_seed {
         core.engine.play_now(vec![seed.clone()]);
@@ -214,6 +229,32 @@ pub async fn radio(ix: &Ix, cmd: RadioCmd) -> Result<()> {
         color::SUCCESS,
     );
     ix.reply_temp(vec![card], SHORT_SECS).await
+}
+
+/// 24/7: a radio from the song that just played, or (after a restart) the
+/// last one in your history.
+pub async fn radio_to_keep_going(core: &Core, store: &Store) -> Result<usize> {
+    let seed = match core.engine.current_track() {
+        Some(track) => (*track).clone(),
+        None => {
+            let last = store
+                .recent_history(1)
+                .into_iter()
+                .next()
+                .ok_or_else(|| oops("Nothing in your history to start a radio from."))?;
+            let id = librespot_core::SpotifyId::from_base62(last.track_id())
+                .map_err(|_| oops("The last song in your history has a broken link."))?;
+            core.spotify
+                .resolve(Lookup::Track(id))
+                .await?
+                .and_then(|r| r.tracks.into_iter().next())
+                .ok_or_else(|| oops("Spotify couldn't find the last song you played."))?
+        }
+    };
+    let station = core.spotify.radio(&seed).await?;
+    let count = station.tracks.len();
+    core.engine.replace_upcoming(station.tracks);
+    Ok(count)
 }
 
 /// Radio from the song that just played, for the panel's buttons.
@@ -235,12 +276,15 @@ pub async fn radio_from_current(core: &Core) -> Result<usize> {
 pub async fn liked(ix: &Ix, cmd: LikedCmd) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
         app.ui.set_home(channel);
     }
     let shuffle = cmd.shuffle.unwrap_or(true);
+    if matches!(cmd.from, Some(LikedFrom::Friends)) {
+        return friends_liked(ix, &core, target, shuffle).await;
+    }
     let liked = core
         .spotify
         .liked_songs(shuffle)
@@ -256,7 +300,7 @@ pub async fn liked(ix: &Ix, cmd: LikedCmd) -> Result<()> {
     let card = commands::enqueue(
         app,
         &core,
-        guild,
+        target,
         liked.tracks,
         Placement::End,
         liked.source,
@@ -266,10 +310,49 @@ pub async fn liked(ix: &Ix, cmd: LikedCmd) -> Result<()> {
     ix.reply_temp(vec![card], SHORT_SECS).await
 }
 
+/// `/liked from:friends`: what your friends liked on the panel, most liked first.
+async fn friends_liked(
+    ix: &Ix,
+    core: &Core,
+    target: commands::Target,
+    shuffle: bool,
+) -> Result<()> {
+    let app = &ix.app;
+    let mut uris: Vec<SpotifyUri> = friends::friends_liked(app)
+        .iter()
+        .filter_map(|uri| SpotifyId::from_base62(uri.rsplit(':').next()?).ok())
+        .map(|id| SpotifyUri::Track { id })
+        .take(MAX_TRACKS_PER_REQUEST)
+        .collect();
+    if uris.is_empty() {
+        return Err(oops(
+            "Your friends haven't liked anything yet. Anyone in the call can press ♥ on the panel.",
+        ));
+    }
+    if shuffle {
+        uris.shuffle(&mut rand::rng());
+    }
+    let resolved = core
+        .spotify
+        .load_tracks(uris, "songs your **friends liked**".to_string())
+        .await;
+    let card = commands::enqueue(
+        app,
+        core,
+        target,
+        resolved.tracks,
+        Placement::End,
+        resolved.source,
+        None,
+    )
+    .await?;
+    ix.reply_temp(vec![card], SHORT_SECS).await
+}
+
 pub async fn playlist(ix: &Ix, cmd: PlaylistCmd) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
         app.ui.set_home(channel);
@@ -302,7 +385,7 @@ pub async fn playlist(ix: &Ix, cmd: PlaylistCmd) -> Result<()> {
     let card = commands::enqueue(
         app,
         &core,
-        guild,
+        target,
         resolved.tracks,
         Placement::End,
         resolved.source,
@@ -329,7 +412,7 @@ pub fn find_spotify_link(text: &str) -> Option<String> {
 pub async fn message_command(ix: &Ix, data: CommandData) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     let message = data
         .target_id
         .zip(data.resolved.as_ref())
@@ -367,7 +450,7 @@ pub async fn message_command(ix: &Ix, data: CommandData) -> Result<()> {
     let card = commands::enqueue(
         app,
         &core,
-        guild,
+        target,
         resolved.tracks,
         placement,
         resolved.source,

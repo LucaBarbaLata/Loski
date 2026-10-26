@@ -1,12 +1,22 @@
-//! Sound commands: /filter, /sleep and /normalize.
+//! Sound commands: /filter, /sleep and /normalize, and the "My sound" EQ card.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use twilight_interactions::command::{CommandModel, CommandOption, CreateCommand, CreateOption};
+use twilight_model::channel::message::{Component, component::ButtonStyle};
 
-use super::{SHORT_SECS, cards, interact::Ix, oops};
-use crate::{dsp::Filter, personality};
+use super::{
+    App, SHORT_SECS,
+    cards::{self, Btn, color},
+    icons::{Icon, Icons},
+    interact::Ix,
+    oops, settings,
+};
+use crate::{
+    dsp::{EQ_BANDS, EQ_RANGE, Filter},
+    personality,
+};
 
 #[derive(CommandOption, CreateOption)]
 pub enum FilterChoice {
@@ -24,10 +34,12 @@ pub enum FilterChoice {
     Slowed,
     #[option(name = "8D (use headphones)", value = "8d")]
     EightD,
+    #[option(name = "My sound (your own EQ, from /settings)", value = "mine")]
+    Mine,
 }
 
 impl FilterChoice {
-    fn filter(&self) -> Filter {
+    fn filter(&self, eq: [i8; 5]) -> Filter {
         match self {
             FilterChoice::Off => Filter::Off,
             FilterChoice::Bass => Filter::BassBoost,
@@ -36,6 +48,7 @@ impl FilterChoice {
             FilterChoice::Nightcore => Filter::Nightcore,
             FilterChoice::Slowed => Filter::Slowed,
             FilterChoice::EightD => Filter::EightD,
+            FilterChoice::Mine => Filter::Mine(eq),
         }
     }
 }
@@ -92,10 +105,11 @@ pub struct NormalizeCmd {
 
 pub async fn filter(ix: &Ix, cmd: FilterCmd) -> Result<()> {
     let core = ix.app.core()?;
-    let filter = cmd.sound.filter();
+    let filter = cmd.sound.filter(ix.app.prefs().eq);
     core.engine.set_filter(filter).map_err(oops)?;
     let text = match filter {
         Filter::Off => "Filters off. Back to the original sound.".to_string(),
+        Filter::Mine(_) => "**My sound** is on. Change it from `/settings` → My sound.".to_string(),
         other => format!(
             "**{}**: {}.",
             other.label(),
@@ -162,5 +176,121 @@ pub async fn normalize(ix: &Ix, cmd: NormalizeCmd) -> Result<()> {
         }
     };
     ix.reply_temp(vec![cards::info(&ix.app.icons, &text)], SHORT_SECS)
+        .await
+}
+
+/// What the "My sound" card shows.
+pub struct EqView {
+    pub gains: [i8; 5],
+    /// "My sound" is the filter playing now.
+    pub on: bool,
+}
+
+impl EqView {
+    pub fn read(app: &App) -> Self {
+        Self {
+            gains: app.prefs().eq,
+            on: app
+                .core
+                .get()
+                .is_some_and(|core| matches!(core.engine.mixer().filter(), Filter::Mine(_))),
+        }
+    }
+}
+
+fn gain_words(name: &str, gain: i8) -> String {
+    match gain {
+        0 => format!("{name}: flat"),
+        g if g > 0 => format!("{name}: +{g} dB"),
+        g => format!("{name}: {g} dB"),
+    }
+}
+
+/// Your own EQ: a menu per band. `from_settings` puts a Back button on it
+/// instead of Close.
+pub fn eq_card(icons: &Icons, view: &EqView, from_settings: bool) -> Component {
+    let origin = if from_settings { "s" } else { "p" };
+    let status = if view.on {
+        "It's on, so you hear each change right away."
+    } else {
+        "Press **Use My sound** to hear it."
+    };
+    let mut parts = vec![cards::text(format!(
+        "{} **My sound**\nYour own EQ: turn each part of the sound up or down. {status}",
+        icons.md(Icon::Filters)
+    ))];
+    for (band, (&(name, _), &gain)) in EQ_BANDS.iter().zip(&view.gains).enumerate() {
+        let options = (-EQ_RANGE..=EQ_RANGE)
+            .rev()
+            .step_by(2)
+            .map(|g| {
+                let mut option = cards::option(gain_words(name, g), g.to_string(), None, None);
+                option.default = g == gain;
+                option
+            })
+            .collect();
+        parts.push(cards::row(vec![cards::select(
+            &format!("loski:eq:{origin}:{band}"),
+            name,
+            false,
+            options,
+        )]));
+    }
+    let toggle = if view.on {
+        Btn::label(&format!("loski:eq:{origin}:off"), "Turn it off").build(icons)
+    } else {
+        Btn::icon(&format!("loski:eq:{origin}:on"), Icon::Filters)
+            .with_label("Use My sound")
+            .style(ButtonStyle::Primary)
+            .build(icons)
+    };
+    let flat_id = format!("loski:eq:{origin}:flat");
+    let leave_id = format!("loski:eq:{origin}:leave");
+    parts.push(cards::row(vec![
+        toggle,
+        Btn::label(&flat_id, "Flat")
+            .disabled(view.gains == [0; 5])
+            .build(icons),
+        Btn::label(&leave_id, if from_settings { "Back" } else { "Close" }).build(icons),
+    ]));
+    cards::card(Some(color::BRAND), parts)
+}
+
+/// A menu or button on the "My sound" card: `rest` is `origin:action`.
+pub async fn eq_action(ix: &Ix, rest: &str, value: Option<&str>) -> Result<()> {
+    let app = &ix.app;
+    let (origin, action) = rest.split_once(':').unwrap_or(("p", rest));
+    let from_settings = origin == "s";
+    let mut playing = EqView::read(app).on;
+    match action {
+        "on" => playing = true,
+        "off" => {
+            app.core()?.engine.set_filter(Filter::Off).map_err(oops)?;
+            playing = false;
+        }
+        "flat" => app.update_prefs(|p| p.eq = [0; 5]),
+        "leave" if from_settings => return settings::show(ix).await,
+        "leave" => {
+            ix.ack().await?;
+            ix.delete_reply().await;
+            return Ok(());
+        }
+        band => {
+            let gain = value.and_then(|v| v.parse::<i8>().ok());
+            if let (Ok(band), Some(gain)) = (band.parse::<usize>(), gain)
+                && band < EQ_BANDS.len()
+            {
+                app.update_prefs(|p| p.eq[band] = gain.clamp(-EQ_RANGE, EQ_RANGE));
+            }
+        }
+    }
+    if playing {
+        let eq = app.prefs().eq;
+        app.core()?
+            .engine
+            .set_filter(Filter::Mine(eq))
+            .map_err(oops)?;
+    }
+    ix.update_message(vec![eq_card(&app.icons, &EqView::read(app), from_settings)])
         .await
 }

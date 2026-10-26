@@ -1,8 +1,16 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use librespot_core::SpotifyId;
 use rand::seq::SliceRandom;
 
 use crate::track::TrackInfo;
+
+/// How long after a change its Undo button still works (it shows for less).
+const UNDO_WINDOW: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Repeat {
@@ -37,6 +45,17 @@ pub struct Queue {
     items: Vec<Arc<TrackInfo>>,
     current: Option<usize>,
     pub repeat: Repeat,
+    undo: Option<Undo>,
+    undo_seq: u64,
+}
+
+/// What was coming up before a clear, remove, dedupe or shuffle.
+struct Undo {
+    id: u64,
+    /// The song playing then; undoing after it changed would be confusing.
+    current: Option<SpotifyId>,
+    upcoming: Vec<Arc<TrackInfo>>,
+    at: Instant,
 }
 
 impl Queue {
@@ -178,10 +197,44 @@ impl Queue {
         removed
     }
 
+    /// Shuffles what's coming up, then spreads out songs by the same
+    /// artist so they don't play back to back.
     pub fn shuffle_upcoming(&mut self) -> usize {
         let start = self.upcoming_start().min(self.items.len());
         self.items[start..].shuffle(&mut rand::rng());
+        spread_artists(&mut self.items[start..]);
         self.items.len() - start
+    }
+
+    /// Remembers what's coming up, so the next change can be undone.
+    pub fn save_undo(&mut self) -> u64 {
+        self.undo_seq += 1;
+        self.undo = Some(Undo {
+            id: self.undo_seq,
+            current: self.current().map(|t| t.id),
+            upcoming: self.upcoming().to_vec(),
+            at: Instant::now(),
+        });
+        self.undo_seq
+    }
+
+    /// Puts back what was coming up when undo point `id` was saved, and
+    /// returns how many songs that is.
+    pub fn undo(&mut self, id: u64) -> Result<usize, &'static str> {
+        if self.undo.as_ref().is_none_or(|u| u.id != id) {
+            return Err("That can't be undone anymore.");
+        }
+        let undo = self.undo.take().expect("checked above");
+        if undo.at.elapsed() > UNDO_WINDOW {
+            return Err("Too late to undo that one.");
+        }
+        if self.current().map(|t| t.id) != undo.current {
+            return Err("The song changed since, so I left the queue as it is.");
+        }
+        let start = self.upcoming_start().min(self.items.len());
+        self.items.truncate(start);
+        self.items.extend(undo.upcoming);
+        Ok(self.items.len() - start)
     }
 
     /// Marks everything as played, so the queue counts as finished.
@@ -195,10 +248,50 @@ impl Queue {
     }
 }
 
+/// The artist a song counts as, for spreading them out.
+fn lead_artist(track: &TrackInfo) -> String {
+    track
+        .artists
+        .first()
+        .map(|a| a.to_lowercase())
+        .unwrap_or_default()
+}
+
+/// Reorders shuffled songs so the same artist doesn't play twice in a row,
+/// wherever the rest of the list allows it. Each slot takes the next song
+/// (in shuffled order) by someone other than the last artist, unless an
+/// artist has so many songs left that they have to go now to fit at all.
+fn spread_artists(songs: &mut [Arc<TrackInfo>]) {
+    let mut left: Vec<(String, Arc<TrackInfo>)> =
+        songs.iter().map(|t| (lead_artist(t), t.clone())).collect();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (artist, _) in &left {
+        *counts.entry(artist.clone()).or_default() += 1;
+    }
+    let mut last: Option<String> = None;
+    for slot in songs.iter_mut() {
+        let remaining = left.len();
+        let urgent = counts
+            .iter()
+            .find(|(artist, count)| Some(*artist) != last.as_ref() && **count * 2 > remaining)
+            .map(|(artist, _)| artist.clone());
+        let index = match &urgent {
+            Some(artist) => left.iter().position(|(a, _)| a == artist),
+            None => left.iter().position(|(a, _)| Some(a) != last.as_ref()),
+        }
+        .unwrap_or(0);
+        let (artist, song) = left.remove(index);
+        if let Some(count) = counts.get_mut(&artist) {
+            *count -= 1;
+        }
+        *slot = song;
+        last = Some(artist);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librespot_core::SpotifyId;
 
     fn track(n: u8) -> Arc<TrackInfo> {
         Arc::new(TrackInfo {
@@ -212,6 +305,7 @@ mod tests {
             explicit: false,
             year: None,
             from: None,
+            requested_by: None,
         })
     }
 
@@ -282,6 +376,54 @@ mod tests {
         assert_eq!(q.remove_range(5, 9), 0);
         assert_eq!(titles(&q), ["t2"]);
         assert_eq!(q.current().unwrap().title, "t1");
+    }
+
+    fn by(n: u8, artist: &str) -> Arc<TrackInfo> {
+        Arc::new(TrackInfo {
+            artists: vec![artist.into()],
+            ..(*track(n)).clone()
+        })
+    }
+
+    #[test]
+    fn shuffle_spreads_out_artists() {
+        for _ in 0..50 {
+            let mut q = Queue::default();
+            let songs = (0..12)
+                .map(|n| by(n, ["A", "A", "A", "B", "B", "C"][n as usize % 6]))
+                .collect();
+            q.add(songs, false);
+            assert_eq!(q.shuffle_upcoming(), 12);
+            let artists: Vec<String> = q.upcoming().iter().map(|t| lead_artist(t)).collect();
+            let repeats = artists.windows(2).filter(|w| w[0] == w[1]).count();
+            assert_eq!(repeats, 0, "{artists:?}");
+        }
+        // When one artist is most of the queue, the rest still spreads them.
+        let mut songs: Vec<_> = (0..5).map(|n| by(n, "A")).chain([by(9, "B")]).collect();
+        spread_artists(&mut songs);
+        assert_eq!(lead_artist(&songs[1]), "b");
+    }
+
+    #[test]
+    fn undo_puts_the_queue_back() {
+        let mut q = Queue::default();
+        q.add([1, 2, 3, 4].into_iter().map(track).collect(), false);
+        q.set_current(0);
+        let id = q.save_undo();
+        q.clear_upcoming();
+        assert_eq!(q.undo(id), Ok(3));
+        assert_eq!(titles(&q), ["t2", "t3", "t4"]);
+        // Once only.
+        assert!(q.undo(id).is_err());
+
+        let id = q.save_undo();
+        q.shuffle_upcoming();
+        q.set_current(1);
+        assert!(q.undo(id).is_err(), "the song changed, so no undo");
+        let old = q.save_undo();
+        let newer = q.save_undo();
+        assert!(q.undo(old).is_err(), "only the latest change can be undone");
+        assert!(q.undo(newer).is_ok());
     }
 
     #[test]

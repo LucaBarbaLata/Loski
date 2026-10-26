@@ -2,3 +2,7 @@
 /data
 .env
 *.tmp
+# Backups hold your tokens and Spotify login.
+loski-backup-*.tar.gz
+data.before-restore-*/
+.env.before-restore-*

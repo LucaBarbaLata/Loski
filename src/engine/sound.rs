@@ -259,6 +259,7 @@ mod tests {
             explicit: false,
             year: None,
             from: None,
+            requested_by: None,
         }
     }
 

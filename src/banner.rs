@@ -1,5 +1,6 @@
-//! The artwork banner on the now playing card: the cover blurred into a
-//! backdrop, the sharp cover with a soft shadow, and the song's details.
+//! The artwork on the now playing card ("Glass"): the cover's colours
+//! blurred into a backdrop, a frosted panel over it, and on the panel the
+//! sharp cover and the song's details.
 //!
 //! Everything is drawn with plain pixel maths: rounded corners and shadows
 //! come from a signed distance to a rounded rectangle, and text is
@@ -20,14 +21,22 @@ use parking_lot::Mutex;
 use crate::{track::TrackInfo, util::fmt_ms};
 
 pub const WIDTH: u32 = 1200;
-pub const HEIGHT: u32 = 440;
+pub const HEIGHT: u32 = 560;
 pub const FILENAME: &str = "banner.jpg";
 
-const COVER: f32 = 340.0;
-const COVER_X: f32 = 50.0;
+/// The frosted panel, inset from the edges.
+const PANEL: Rect = Rect {
+    x: 44.0,
+    y: 44.0,
+    w: WIDTH as f32 - 88.0,
+    h: HEIGHT as f32 - 88.0,
+    radius: 40.0,
+};
+const COVER: f32 = 320.0;
+const COVER_X: f32 = PANEL.x + 40.0;
 const COVER_Y: f32 = (HEIGHT as f32 - COVER) / 2.0;
-const TEXT_X: f32 = 440.0;
-const TEXT_MAX_WIDTH: f32 = 710.0;
+const TEXT_X: f32 = COVER_X + COVER + 48.0;
+const TEXT_MAX_WIDTH: f32 = PANEL.x + PANEL.w - 44.0 - TEXT_X;
 
 const BRICOLAGE: &[u8] = include_bytes!("../assets/fonts/BricolageGrotesque.ttf");
 const NOTO: &[u8] = include_bytes!("../assets/fonts/NotoSans.ttf");
@@ -237,6 +246,33 @@ impl Canvas {
         }
     }
 
+    /// A frosted glass panel: a light, slightly brighter-at-the-top fill
+    /// with a thin bright rim, over whatever is already drawn.
+    pub fn glass(&mut self, rect: Rect) {
+        let Rect { x, y, w, h, radius } = rect;
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        for py in (y as i32 - 1)..=((y + h) as i32 + 1) {
+            let t = ((py as f32 - y) / h).clamp(0.0, 1.0);
+            let fill = 0.15 - 0.06 * t;
+            for px in (x as i32 - 1)..=((x + w) as i32 + 1) {
+                let d = rounded_rect_distance(
+                    px as f32 + 0.5 - cx,
+                    py as f32 + 0.5 - cy,
+                    w / 2.0,
+                    h / 2.0,
+                    radius,
+                );
+                let coverage = (0.5 - d).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                // The rim: the outermost two pixels, brighter.
+                let rim = if d > -2.5 { 0.22 } else { 0.0 };
+                self.blend(px, py, WHITE, (fill + rim) * coverage);
+            }
+        }
+    }
+
     /// Draws `img` at (x, y) clipped to rounded corners.
     pub fn image_rounded(&mut self, img: &RgbImage, x: f32, y: f32, radius: f32) {
         let (w, h) = (img.width() as f32, img.height() as f32);
@@ -379,89 +415,107 @@ impl From<&TrackInfo> for BannerText {
 pub fn render(cover: &RgbImage, info: &BannerText) -> Option<Vec<u8>> {
     let title_face = face_for(&info.title)?;
     let artist_face = face_for(&info.artists)?;
-    let meta_line = match (info.album.is_empty(), info.year) {
+    // Album and year sit above the title, small and spaced out.
+    let kicker = match (info.album.is_empty(), info.year) {
         (false, Some(year)) => format!("{} · {year}", info.album),
         (false, None) => info.album.clone(),
         (true, Some(year)) => year.to_string(),
         (true, None) => String::new(),
-    };
-    let meta_face = face_for(&meta_line).unwrap_or(&FONTS.noto);
+    }
+    .to_uppercase();
+    let kicker_face = face_for(&kicker).unwrap_or(&FONTS.noto);
 
-    // Backdrop: the cover blurred, darkened most on the left, where the text sits.
+    // Backdrop: the cover blurred, a little more vivid than the cover
+    // itself and darkened enough for white text, most at the edges.
     let mut canvas = Canvas::blurred(cover, WIDTH, HEIGHT);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
-            let t = x as f32 / WIDTH as f32;
-            let vignette = 1.0 - 0.18 * ((y as f32 / HEIGHT as f32) - 0.5).abs() * 2.0;
-            let shade = (0.30 + 0.28 * t) * vignette;
+            let (u, v) = (
+                x as f32 / WIDTH as f32 - 0.5,
+                y as f32 / HEIGHT as f32 - 0.5,
+            );
+            let shade = 0.66 - 0.28 * (u * u + v * v).sqrt();
             let px = &mut canvas.pixels[(y * WIDTH + x) as usize];
+            let luma = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
             for c in px.iter_mut() {
-                *c = *c * shade + 6.0;
+                let vivid = luma + (*c - luma) * 1.35;
+                *c = (vivid * shade + 4.0).clamp(0.0, 255.0);
             }
         }
     }
 
-    // Cover with a soft drop shadow.
+    // The panel, floating a little above the backdrop.
     let shadow = Rect {
+        y: PANEL.y + 18.0,
+        ..PANEL
+    };
+    canvas.rounded_rect(shadow, [0.0; 3], 0.22, 30.0);
+    canvas.glass(PANEL);
+
+    // Cover with a soft drop shadow.
+    let cover_shadow = Rect {
         x: COVER_X,
-        y: COVER_Y + 16.0,
+        y: COVER_Y + 14.0,
         w: COVER,
         h: COVER,
-        radius: 22.0,
+        radius: 24.0,
     };
-    canvas.rounded_rect(shadow, [0.0; 3], 0.6, 26.0);
+    canvas.rounded_rect(cover_shadow, [0.0; 3], 0.5, 24.0);
     let sharp = image::imageops::resize(cover, COVER as u32, COVER as u32, FilterType::Lanczos3);
-    canvas.image_rounded(&sharp, COVER_X, COVER_Y, 18.0);
+    canvas.image_rounded(&sharp, COVER_X, COVER_Y, 22.0);
 
     let (title_size, title_lines) = fit_title(&title_face.display, &info.title);
+    let kicker_size = 21.0;
     let artist_size = 34.0;
-    let meta_size = 25.0;
     let chip_size = 21.0;
     let chip_height = 40.0;
+    let kicker_pen = Pen {
+        tracking: 3.0,
+        ..Pen::white(&kicker_face.medium, kicker_size, 0.74)
+    };
+    let kicker = ellipsize(kicker_pen.font, kicker_size, &kicker, TEXT_MAX_WIDTH - 40.0);
     let artist = ellipsize(
         &artist_face.medium,
         artist_size,
         &info.artists,
         TEXT_MAX_WIDTH,
     );
-    let meta = ellipsize(&meta_face.regular, meta_size, &meta_line, TEXT_MAX_WIDTH);
 
     let title_line_height = title_size * 1.04;
-    let block_height = title_lines.len() as f32 * title_line_height
-        + 16.0
+    let block_height = if kicker.is_empty() {
+        0.0
+    } else {
+        kicker_size + 18.0
+    } + title_lines.len() as f32 * title_line_height
+        + 14.0
         + artist_size
-        + if meta.is_empty() {
-            0.0
-        } else {
-            10.0 + meta_size
-        }
-        + 26.0
+        + 28.0
         + chip_height;
     let mut y = (HEIGHT as f32 - block_height) / 2.0;
 
+    if !kicker.is_empty() {
+        y += kicker_size;
+        canvas.text(&kicker_pen, &kicker, TEXT_X, y - kicker_size * 0.15);
+        y += 18.0;
+    }
     let title_pen = Pen::white(&title_face.display, title_size, 1.0);
     for line in &title_lines {
         y += title_line_height;
         canvas.text(&title_pen, line, TEXT_X, y - title_size * 0.2);
     }
-    y += 16.0 + artist_size;
+    y += 14.0 + artist_size;
     let artist_pen = Pen::white(&artist_face.medium, artist_size, 0.93);
     canvas.text(&artist_pen, &artist, TEXT_X, y - artist_size * 0.18);
-    if !meta.is_empty() {
-        y += 10.0 + meta_size;
-        let meta_pen = Pen::white(&meta_face.regular, meta_size, 0.66);
-        canvas.text(&meta_pen, &meta, TEXT_X, y - meta_size * 0.18);
-    }
 
     // Chips: quality, length, explicit.
-    y += 26.0;
+    y += 28.0;
     let mut chips = vec!["320 kbps".to_string(), fmt_ms(info.duration_ms as u64)];
     if info.explicit {
         chips.push("E".to_string());
     }
     let chip_pen = Pen {
         tracking: 0.4,
-        ..Pen::white(&FONTS.bricolage.medium, chip_size, 0.94)
+        ..Pen::white(&FONTS.bricolage.medium, chip_size, 0.96)
     };
     let mut x = TEXT_X;
     for chip in chips {
@@ -473,7 +527,7 @@ pub fn render(cover: &RgbImage, info: &BannerText) -> Option<Vec<u8>> {
             h: chip_height,
             radius: chip_height / 2.0,
         };
-        canvas.rounded_rect(pill, WHITE, 0.16, 0.0);
+        canvas.rounded_rect(pill, WHITE, 0.2, 0.0);
         canvas.text(&chip_pen, &chip, x + 16.0, y + chip_height * 0.68);
         x += w + 10.0;
     }

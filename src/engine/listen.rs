@@ -2,6 +2,7 @@
 //! when it ends or something else starts, with the time it really played.
 
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,6 +20,8 @@ pub struct Played {
     pub track: Arc<TrackInfo>,
     pub started_at: i64,
     pub listened_ms: u64,
+    /// Friends in the call while it played (Discord user ids).
+    pub with: Vec<u64>,
 }
 
 pub(super) struct Listen {
@@ -26,6 +29,8 @@ pub(super) struct Listen {
     started_at: i64,
     pub(super) heard: Duration,
     last: Instant,
+    /// Everyone who was in the call while it played.
+    with: BTreeSet<u64>,
 }
 
 /// Whether `heard` of a song counts as having played it.
@@ -44,6 +49,7 @@ impl Inner {
             started_at: now_unix(),
             heard: Duration::ZERO,
             last: Instant::now(),
+            with: BTreeSet::new(),
         });
     }
 
@@ -54,6 +60,7 @@ impl Inner {
             let now = Instant::now();
             if playing {
                 listen.heard += now - listen.last;
+                listen.with.extend(&self.audience);
             }
             listen.last = now;
         }
@@ -69,10 +76,12 @@ impl Inner {
             return;
         }
         let track = &listen.track;
+        let with: Vec<u64> = listen.with.into_iter().collect();
         self.played.push(Played {
             track: track.clone(),
             started_at: listen.started_at,
             listened_ms: listen.heard.as_millis() as u64,
+            with: with.clone(),
         });
         let entry = HistoryEntry {
             played_at: listen.started_at,
@@ -82,6 +91,8 @@ impl Inner {
             artist_list: track.artists.clone(),
             cover: track.cover_thumb_url.clone(),
             listened_ms: Some(listen.heard.as_millis() as u64),
+            with,
+            requested_by: track.requested_by,
         };
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.append_history(&entry));

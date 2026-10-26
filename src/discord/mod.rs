@@ -1,17 +1,23 @@
+mod blend;
 mod cards;
 mod commands;
 mod components;
+mod friends;
 mod icons;
 mod interact;
 mod library;
+mod lyrics;
+mod milestones;
 mod mixes;
 mod panel;
 mod profile;
 mod recap;
 mod requests;
+mod settings;
 mod sound;
 mod stats;
 mod status;
+mod updates;
 mod voice;
 
 #[cfg(test)]
@@ -19,7 +25,10 @@ mod card_tests;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -35,7 +44,7 @@ use twilight_gateway::{
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::InteractionType,
-    channel::message::Component,
+    channel::{Message, message::Component},
     gateway::{
         payload::{
             incoming::GuildCreate,
@@ -52,13 +61,24 @@ use twilight_model::{
 use crate::{
     config::Config,
     engine::{Engine, FollowTarget},
+    genres::{self, Genres},
     spotify::{
         self, Spotify, auth,
         web::{SearchItem, SearchKind, WebApi},
     },
-    store::Store,
+    stats::HistoryFilter,
+    store::{Prefs, Store},
     util::truncate,
 };
+
+/// Where the claimed owner is remembered, inside the data folder.
+pub const OWNER_MARKER: &str = "owner";
+
+/// A fresh six-digit code for claiming Loski.
+pub fn claim_code() -> String {
+    use rand::Rng;
+    format!("{:06}", rand::rng().random_range(0..1_000_000))
+}
 
 /// How long replies stay before cleaning themselves up.
 pub const SHORT_SECS: u64 = 10;
@@ -116,8 +136,22 @@ pub struct App {
     /// The latest heartbeat round trip to Discord's gateway.
     pub ping: Mutex<Option<Duration>>,
     pub requests: requests::Requests,
+    /// Who's listening, and their likes and votes for the song playing.
+    pub room: friends::Room,
     /// Problems you've been told about and not yet told are fixed.
     alerts: Mutex<HashSet<&'static str>>,
+    /// The newest release GitHub told us about.
+    pub latest_release: Mutex<Option<updates::Release>>,
+    /// What you set in /settings (see `settings.rs` for the accessors).
+    prefs: Mutex<Prefs>,
+    /// Your Discord user id; 0 until someone claims Loski.
+    owner: AtomicU64,
+    /// The code that claims Loski, while it has no owner.
+    claim: Option<String>,
+    /// Your artists' genres, looked up on MusicBrainz.
+    pub genres: Arc<Genres>,
+    /// What the history card shows: the last /history search, and how it reads.
+    pub history_view: Mutex<(HistoryFilter, String)>,
 }
 
 impl App {
@@ -131,7 +165,12 @@ impl App {
     }
 
     pub fn owner_id(&self) -> Id<UserMarker> {
-        Id::new(self.cfg.owner_id)
+        // Nobody yet: an id no Discord account has, so nothing matches it.
+        Id::new(self.owner.load(Ordering::Relaxed).max(1))
+    }
+
+    pub fn has_owner(&self) -> bool {
+        self.owner.load(Ordering::Relaxed) != 0
     }
 
     /// "Listening to …" under the bot's name. With nothing playing it
@@ -222,7 +261,9 @@ impl App {
     }
 }
 
-pub async fn run(cfg: Arc<Config>) -> Result<()> {
+/// Connects to Discord and runs until shut down. `claim` is the code that
+/// makes someone the owner, when there isn't one yet.
+pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
     let http = Arc::new(Client::new(cfg.discord_token.clone()));
     let bot = http
         .current_user()
@@ -232,20 +273,38 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         .await?;
     let application = http.current_user_application().await?.model().await?;
 
-    let intents = Intents::GUILDS | Intents::GUILD_VOICE_STATES;
+    // Direct messages are for claiming Loski; their text comes without a
+    // privileged intent.
+    let intents = Intents::GUILDS | Intents::GUILD_VOICE_STATES | Intents::DIRECT_MESSAGES;
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token.clone(), intents);
     let sender = shard.sender();
     let shards = TwilightMap::new(HashMap::from([(shard.id().number(), sender.clone())]));
     let songbird = Arc::new(Songbird::twilight(Arc::new(shards), bot.id));
 
     let cache = DefaultInMemoryCache::builder()
-        .resource_types(ResourceType::GUILD | ResourceType::CHANNEL | ResourceType::VOICE_STATE)
+        // Members and users come with voice states: names for who's listening.
+        .resource_types(
+            ResourceType::GUILD
+                | ResourceType::CHANNEL
+                | ResourceType::VOICE_STATE
+                | ResourceType::MEMBER
+                | ResourceType::USER,
+        )
         .build();
     let web = reqwest::Client::builder()
         .user_agent(concat!("Loski/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let store =
         Arc::new(Store::new(cfg.data_dir.clone()).context("could not create the data folder")?);
+    let prefs = store.load_prefs();
+    let names = store.load_names();
+    let genres = Genres::load(&cfg.data_dir);
+    let owner = cfg.owner_id.unwrap_or_else(|| {
+        store
+            .read_marker(OWNER_MARKER)
+            .and_then(|id| id.parse().ok())
+            .unwrap_or(0)
+    });
 
     let app = Arc::new(App {
         cfg: cfg.clone(),
@@ -265,8 +324,18 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         started: Instant::now(),
         ping: Mutex::new(None),
         requests: requests::Requests::default(),
+        room: friends::Room::new(names),
         alerts: Mutex::new(HashSet::new()),
+        latest_release: Mutex::new(None),
+        prefs: Mutex::new(prefs),
+        owner: AtomicU64::new(owner),
+        claim: claim.filter(|_| owner == 0),
+        genres: genres.clone(),
+        history_view: Mutex::new(Default::default()),
     });
+    tokio::spawn(genres::fill_loop(genres, app.web.clone()));
+    app.ui
+        .set_fixed(app.prefs().panel_channel.and_then(Id::new_checked));
 
     {
         let app = app.clone();
@@ -284,6 +353,7 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         });
     }
     tokio::spawn(profile::sync(app.clone()));
+    tokio::spawn(updates::check_loop(app.clone()));
     tokio::spawn(init_core(app.clone()));
 
     let shutdown = shutdown_signal();
@@ -337,10 +407,16 @@ async fn handle_event(app: Arc<App>, event: Event) {
     match event {
         Event::Ready(ready) => {
             tracing::info!("Logged in to Discord as {}", ready.user.name);
+            if let Some(code) = app.claim.as_deref().filter(|_| !app.has_owner()) {
+                tracing::warn!(
+                    "No owner yet: DM {} \"claim {code}\" from your Discord account to become its owner.",
+                    ready.user.name
+                );
+            }
             app.set_listening(None);
             if ready.guilds.is_empty() {
                 tracing::warn!(
-                    "Loski isn't in any server yet. Invite it with: https://discord.com/oauth2/authorize?client_id={}&scope=bot+applications.commands&permissions=3230720",
+                    "Loski isn't in any server yet. Invite it with: https://discord.com/oauth2/authorize?client_id={}&scope=bot+applications.commands&permissions=281474979941376",
                     app.app_id
                 );
             }
@@ -363,6 +439,7 @@ async fn handle_event(app: Arc<App>, event: Event) {
             }
         }
         Event::VoiceStateUpdate(update) => voice::on_voice_state(&app, &update.0).await,
+        Event::MessageCreate(message) => claim_by_dm(&app, &message.0).await,
         Event::InteractionCreate(interaction) => {
             let interaction = interaction.0;
             match interaction.kind {
@@ -387,14 +464,63 @@ async fn init_core(app: Arc<App>) {
             Ok(core) => {
                 let _ = app.core.set(core);
                 tracing::info!("Loski is ready");
+                tokio::spawn(voice::come_back(app.clone()));
                 welcome_once(&app).await;
                 tokio::spawn(stats::recap_loop(app.clone()));
+                tokio::spawn(blend::blend_loop(app.clone()));
+                tokio::spawn(milestones::milestone_loop(app.clone()));
                 return;
             }
             Err(e) => {
                 tracing::error!("Spotify setup failed: {e:#}. Retrying in 15 seconds.");
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
+        }
+    }
+}
+
+/// "claim 123456" in a direct message makes you the owner, while Loski has
+/// none. The code is on the setup page and in the log, so a stranger in your
+/// server can't claim it first.
+async fn claim_by_dm(app: &Arc<App>, message: &Message) {
+    if message.guild_id.is_some() || message.author.bot || app.has_owner() {
+        return;
+    }
+    let Some(code) = app.claim.as_deref() else {
+        return;
+    };
+    let text = message.content.trim().to_lowercase();
+    if !text.starts_with("claim") {
+        return;
+    }
+    let claimed = text.split_whitespace().collect::<Vec<_>>() == ["claim", code];
+    let card = if claimed {
+        app.owner.store(message.author.id.get(), Ordering::Relaxed);
+        app.store
+            .write_marker(OWNER_MARKER, &message.author.id.to_string());
+        tracing::info!("{} claimed Loski and is its owner now", message.author.name);
+        cards::toast(
+            &app.icons,
+            "**You're my owner now.** Everything is yours to control; friends can be co-DJs from `/settings`.",
+            None,
+            cards::color::SUCCESS,
+        )
+    } else {
+        cards::error(
+            &app.icons,
+            "That's not the code. It's on the setup page, and in my log (`loski logs`).",
+        )
+    };
+    let _ = app
+        .http
+        .create_message(message.channel_id)
+        .flags(cards::V2)
+        .components(&[card])
+        .await;
+    if claimed {
+        match app.core.get() {
+            Some(_) => welcome_once(app).await,
+            None => ask_owner_to_log_in(app).await,
         }
     }
 }
@@ -467,6 +593,8 @@ async fn try_init_core(app: &Arc<App>) -> Result<Arc<Core>> {
     tokio::spawn(session_watchdog(app.clone(), core.clone()));
     tokio::spawn(web_watchdog(app.clone(), core.clone()));
     tokio::spawn(voice::heal_loop(app.clone()));
+    tokio::spawn(lyrics::follow_loop(app.clone(), core.clone()));
+    tokio::spawn(connect_queue_loop(core.clone()));
     tokio::spawn(spotify::connect::run(cfg.clone(), core.engine.clone()));
     Ok(core)
 }
@@ -554,6 +682,24 @@ async fn session_watchdog(app: Arc<App>, core: Arc<Core>) {
                 }
             }
         }
+    }
+}
+
+/// While the Spotify app is in control, keeps its up next on the panel
+/// (it can change in the app without the song changing).
+async fn connect_queue_loop(core: Arc<Core>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if core.engine.is_connect() {
+            refresh_connect_queue(&core).await;
+        }
+    }
+}
+
+pub(super) async fn refresh_connect_queue(core: &Core) {
+    match core.spotify.web.queue().await {
+        Ok(tracks) => core.engine.set_connect_up_next(tracks),
+        Err(e) => tracing::debug!("couldn't read the Spotify app's queue: {e:#}"),
     }
 }
 

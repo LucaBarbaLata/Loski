@@ -21,6 +21,9 @@ pub fn init() -> Option<WorkerGuard> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("data"))
         .join("logs");
+    // On a fresh install the folder isn't there yet, and tidying up old
+    // files would complain about that.
+    let _ = std::fs::create_dir_all(&dir);
     let file = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("loski")

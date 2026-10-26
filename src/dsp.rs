@@ -17,7 +17,21 @@ pub enum Filter {
     Nightcore,
     Slowed,
     EightD,
+    /// "My sound": your own EQ, in decibels per band (see `EQ_BANDS`).
+    Mine([i8; 5]),
 }
+
+/// The bands of "My sound": name and centre frequency. The outer two are
+/// shelves (everything below the bass, everything above the treble).
+pub const EQ_BANDS: [(&str, f32); 5] = [
+    ("Bass", 90.0),
+    ("Low-mid", 300.0),
+    ("Mid", 1_000.0),
+    ("High-mid", 3_200.0),
+    ("Treble", 9_000.0),
+];
+/// How far each band of "My sound" goes either way, in decibels.
+pub const EQ_RANGE: i8 = 8;
 
 impl Filter {
     pub const ALL: [Filter; 7] = [
@@ -39,6 +53,7 @@ impl Filter {
             Filter::Nightcore => "Nightcore",
             Filter::Slowed => "Slowed + reverb",
             Filter::EightD => "8D",
+            Filter::Mine(_) => "My sound",
         }
     }
 
@@ -51,6 +66,7 @@ impl Filter {
             Filter::Nightcore => "25% faster and higher",
             Filter::Slowed => "15% slower and lower, with a room",
             Filter::EightD => "Sound circles around your head (use headphones)",
+            Filter::Mine(_) => "Your own EQ, set in /settings",
         }
     }
 
@@ -63,9 +79,11 @@ impl Filter {
             Filter::Nightcore => "nightcore",
             Filter::Slowed => "slowed",
             Filter::EightD => "8d",
+            Filter::Mine(_) => "mine",
         }
     }
 
+    /// The presets; "My sound" needs your EQ, so it isn't one of them.
     pub fn from_key(key: &str) -> Option<Filter> {
         Filter::ALL.into_iter().find(|f| f.key() == key)
     }
@@ -347,6 +365,25 @@ impl Dsp {
                 pre_gain = 0.9;
             }
             Filter::Slowed => reverb = Some((Reverb::new(), 0.32)),
+            Filter::Mine(gains) => {
+                for (i, (&(_, freq), &gain)) in EQ_BANDS.iter().zip(&gains).enumerate() {
+                    let gain = gain.clamp(-EQ_RANGE, EQ_RANGE) as f32;
+                    let shape = match i {
+                        0 => Shape::LowShelf,
+                        4 => Shape::HighShelf,
+                        _ => Shape::Peak,
+                    };
+                    eq.push(Biquad::new(
+                        shape,
+                        freq,
+                        gain,
+                        if i % 4 == 0 { 0.7 } else { 1.0 },
+                    ));
+                }
+                // Room for the loudest boost, so it doesn't lean on the limiter.
+                let boost = gains.iter().copied().max().unwrap_or(0).max(0) as f32;
+                pre_gain = 10f32.powf(-boost / 20.0);
+            }
         }
         if filter == Filter::EightD {
             reverb = Some((Reverb::new(), 0.12));
@@ -505,6 +542,21 @@ mod tests {
             .iter()
             .fold((f32::MAX, 0f32), |(a, b), x| (a.min(*x), b.max(*x)));
         assert!(max / min > 2.0, "pan barely moved: {balance:?}");
+    }
+
+    #[test]
+    fn my_sound_follows_its_bands() {
+        let bassy = Filter::Mine([6, 0, 0, 0, -6]);
+        let low = rms(&run(bassy, &sine(60.0, 44_100), 44_100)[20_000..]);
+        let high = rms(&run(bassy, &sine(10_000.0, 44_100), 44_100)[20_000..]);
+        assert!(low > high * 2.5, "low {low} high {high}");
+        // Flat is (nearly) the song as it was.
+        let input = sine(440.0, 44_100);
+        let flat = run(Filter::Mine([0; 5]), &input, 44_100);
+        assert!((rms(&flat[20_000..]) - rms(&input[20_000..])).abs() < 0.01);
+        let out = run(Filter::Mine([8; 5]), &sine(220.0, 44_100), 44_100);
+        let peak = out.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak < 1.2, "boosted everything and peaked at {peak}");
     }
 
     #[test]
