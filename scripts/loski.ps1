@@ -8,7 +8,8 @@
         .\loski start      Start Docker Desktop if needed, then Loski
         .\loski stop       Stop Loski (it leaves voice first)
         .\loski restart    Restart Loski
-        .\loski update     Get the latest code, rebuild and restart
+        .\loski update     Get the latest code and image from GitHub, then restart
+        .\loski build      Build Loski from this folder instead, then restart
         .\loski logs       Follow the live log (Ctrl+C to stop watching)
         .\loski logs files Open the folder with the saved daily logs
         .\loski status     Whether Loski is running, and its last log lines
@@ -114,6 +115,27 @@ function Wait-Ready([datetime]$Since) {
     return $false
 }
 
+# The image docker-compose.yml runs (the one GitHub Actions publishes).
+function Get-Image {
+    $images = docker compose config --images 2>$null
+    return "$($images | Select-Object -First 1)".Trim()
+}
+
+function Test-Image {
+    docker image inspect (Get-Image) *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+# Downloads the published image. Returns false if that didn't work (no
+# network, or the image isn't public yet), so the caller can build instead.
+function Update-Image {
+    Write-Step 'Downloading the latest Loski image'
+    docker compose pull
+    if ($LASTEXITCODE -eq 0) { return $true }
+    Write-Problem "Couldn't download it (see above), so building it from this folder instead."
+    return $false
+}
+
 function Start-Loski([switch]$Build) {
     $before = Get-StartedAt
     $since = Get-Date
@@ -139,7 +161,9 @@ function Start-Loski([switch]$Build) {
 switch ($Command) {
     'start' {
         if (-not (Test-Env) -or -not (Start-Docker)) { exit 1 }
-        if (-not (Start-Loski)) { exit 1 }
+        # The first time, fetch the ready-made image rather than compiling.
+        $build = -not (Test-Image) -and -not (Update-Image)
+        if (-not (Start-Loski -Build:$build)) { exit 1 }
     }
 
     'stop' {
@@ -173,9 +197,12 @@ switch ($Command) {
                 exit 1
             }
         }
-        else {
-            Write-Done 'No GitHub remote yet, so building the code in this folder.'
-        }
+        $build = -not (Update-Image)
+        if (-not (Start-Loski -Build:$build)) { exit 1 }
+    }
+
+    'build' {
+        if (-not (Test-Env) -or -not (Start-Docker)) { exit 1 }
         if (-not (Start-Loski -Build)) { exit 1 }
     }
 

@@ -1,12 +1,11 @@
 services:
   loski:
+    # Built and published by GitHub Actions; `loski update` downloads it.
+    # `loski build` builds it from this folder instead.
+    image: ghcr.io/lucabarbalata/loski:latest
     build: .
-    image: loski:latest
     container_name: loski
     env_file: .env
-    environment:
-      # Days and months for /stats start at midnight here. Override with TIMEZONE in .env.
-      TIMEZONE: ${TIMEZONE:-Europe/Bucharest}
     volumes:
       - ./data:/data
     ports:

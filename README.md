@@ -3,6 +3,8 @@
 A private Discord music bot that streams **real Spotify audio** (your Premium account, 320 kbps) into a voice channel. Only you can control it. Built in Rust on [librespot](https://github.com/librespot-org/librespot), [songbird](https://github.com/serenity-rs/songbird) and [twilight](https://github.com/twilight-rs/twilight), with every message drawn as a Discord card using Loski's own icon set.
 
 > **Heads-up:** streaming Spotify through librespot isn't allowed by Spotify's terms of service. Loski is meant for private use with your own account. Spotify could, in theory, act on an account that does this.
+>
+> Loski is an independent project. It isn't affiliated with, endorsed by or sponsored by Spotify or Discord. Spotify and Discord are trademarks of their respective owners.
 
 ## Features
 
@@ -64,7 +66,7 @@ Double-click `loski.cmd`, or run it from a terminal in the repo folder:
 .\loski start
 ```
 
-It starts Docker Desktop if it isn't running, builds Loski the first time, and waits until Loski says it's ready.
+It starts Docker Desktop if it isn't running, downloads the ready-made Loski image the first time (see [Prebuilt image](#prebuilt-image)), and waits until Loski says it's ready.
 
 The first time, Loski sends you a DM asking you to open **http://127.0.0.1:5588** on this computer. That page walks you through two Spotify approvals: one for streaming, one for search. After that you never need to log in again. The login is stored in `./data`.
 
@@ -75,12 +77,25 @@ The first time, Loski sends you a DM asking you to open **http://127.0.0.1:5588*
 | `.\loski start` | Start Docker Desktop if needed, then Loski. |
 | `.\loski stop` | Stop Loski. It leaves voice and removes its panel first. |
 | `.\loski restart` | Restart Loski. |
-| `.\loski update` | Get the latest code from GitHub (once the repo has a remote), rebuild and restart. |
+| `.\loski update` | Get the latest code and image from GitHub, then restart. A new image is ready a few minutes after a push, once the checks pass. |
+| `.\loski build` | Build Loski from this folder instead of downloading it (for your own changes), then restart. |
 | `.\loski logs` | Follow the live log. `.\loski logs files` opens the saved daily logs. |
 | `.\loski status` | Whether Loski is running, and its last log lines. |
 | `.\loski selftest` | Check the Spotify connection, search, radio and your library from inside Loski. |
 
-`loski.cmd` runs `scripts/loski.ps1` with permission to run just that script, so you don't have to change PowerShell's script policy. Plain `docker compose up -d --build` and `docker compose down` work too.
+`loski.cmd` runs `scripts/loski.ps1` with permission to run just that script, so you don't have to change PowerShell's script policy. Plain `docker compose pull`, `docker compose up -d` and `docker compose down` work too.
+
+### Prebuilt image
+
+Every push to `main` that passes the checks publishes an image to GitHub's container registry:
+
+| Tag | What it is |
+| --- | --- |
+| `ghcr.io/lucabarbalata/loski:latest` | The newest build of `main`. This is what `docker-compose.yml` runs. |
+| `ghcr.io/lucabarbalata/loski:sha-1a2b3c4` | One particular commit, for going back to a version that worked. |
+| `ghcr.io/lucabarbalata/loski:1.2.0` | A release, when a `v1.2.0` tag is pushed. |
+
+The image is built for 64-bit Intel and AMD machines (`linux/amd64`). To run Loski without the rest of the repo, `docker-compose.yml` and a filled-in `.env` are enough: `docker compose up -d` downloads the image.
 
 ## Commands
 
@@ -131,7 +146,7 @@ The artwork banner is drawn with the bundled Bricolage Grotesque and Noto Sans f
 - **When something breaks.** If voice drops, Loski rejoins on its own (and tells you if it can't). If the Spotify connection stays down, or Spotify signs it out of search, you get a DM with what to do, and another when it's fixed.
 - **Logs.** Besides `docker logs`, Loski writes a log file per day to `data/logs` and keeps the last 14 days, so you can see what happened even after a restart.
 
-- **Stats and history.** A song counts once it has played for 30 seconds (half of it for very short songs), the same rule Spotify uses, and only the time it actually played is added up. Days and months start at midnight in `TIMEZONE`, which `docker-compose.yml` sets to Europe/Bucharest. On the 1st of each month Loski DMs you a recap of the month before; if it was off that day, the recap comes the next time it starts. History lives in `data/history.jsonl` and mixes in `data/mixes.json`.
+- **Stats and history.** A song counts once it has played for 30 seconds (half of it for very short songs), the same rule Spotify uses, and only the time it actually played is added up. Days and months start at midnight in `TIMEZONE`, which is UTC unless you set it in `.env` (for example `TIMEZONE=Europe/Bucharest`). On the 1st of each month Loski DMs you a recap of the month before; if it was off that day, the recap comes the next time it starts. History lives in `data/history.jsonl` and mixes in `data/mixes.json`.
 
 - **Audio quality.** Loski sends Discord the highest bitrate your server's boost level allows: 96 kbps unboosted, up to 384 kbps at level 3. You can set it yourself with `AUDIO_BITRATE`.
 - **Spotify Connect.** Loski shows up as a speaker in your Spotify app whenever it's running. Pick it and Loski joins the voice channel you're in and plays there; the app's play, skip, seek and volume all work, and Discord's buttons control it too. Pick another device to hand back. Running `/play` takes over again with the Discord queue.
@@ -156,7 +171,7 @@ docker run --rm -v "$PWD:/src" -v loski-cargo:/usr/local/cargo/registry -v loski
 
 The tests need no Spotify or Discord connection. They cover the queue, the sound filters, stats, every card against Discord's limits, and the playback engine, which runs whole sessions (gapless, crossfade, repeat, sleep timer, unplayable songs, history) against fake players that record what they're told.
 
-On GitHub, `.github/workflows/checks.yml` runs formatting, clippy, the tests and a full Docker build on every push.
+On GitHub, `.github/workflows/checks.yml` runs formatting, clippy and the tests on every push, then builds the Docker image. For `main` and version tags it also publishes the image (see [Prebuilt image](#prebuilt-image)); pull requests only build it.
 
 How the code is laid out:
 
@@ -178,3 +193,7 @@ src/
 assets/             icons, fonts, avatar and banner art
 scripts/loski.ps1   the launcher behind loski.cmd
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled fonts, Bricolage Grotesque and Noto Sans, are under the SIL Open Font License (see `assets/fonts`).
