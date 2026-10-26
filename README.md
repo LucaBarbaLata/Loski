@@ -95,7 +95,7 @@ Every push to `main` that passes the checks publishes an image to GitHub's conta
 | `ghcr.io/lucabarbalata/loski:sha-1a2b3c4` | One particular commit, for going back to a version that worked. |
 | `ghcr.io/lucabarbalata/loski:1.2.0` | A release, when a `v1.2.0` tag is pushed. |
 
-The image is built for 64-bit Intel and AMD machines (`linux/amd64`). To run Loski without the rest of the repo, `docker-compose.yml` and a filled-in `.env` are enough: `docker compose up -d` downloads the image.
+Each tag holds two builds, and Docker picks the right one by itself: `linux/amd64` for 64-bit Intel and AMD machines, and `linux/arm64` for 64-bit ARM, like a Raspberry Pi 4 or 5 on a 64-bit OS, an Apple Silicon Mac or an ARM server. Both are built natively on GitHub's own machines, side by side. To run Loski without the rest of the repo, `docker-compose.yml` and a filled-in `.env` are enough: `docker compose up -d` downloads the image.
 
 ## Commands
 
