@@ -52,6 +52,15 @@ pub fn text_blocks(lines: impl IntoIterator<Item = String>) -> Vec<Component> {
     blocks
 }
 
+/// Space between parts of a card, without a line.
+pub fn gap() -> Component {
+    Component::Separator(Separator {
+        id: None,
+        divider: Some(false),
+        spacing: Some(SeparatorSpacingSize::Small),
+    })
+}
+
 /// A thin line between parts of a card.
 pub fn divider() -> Component {
     Component::Separator(Separator {
@@ -89,6 +98,21 @@ pub fn image(url: &str, alt: &str) -> Component {
             description: Some(alt.chars().take(1024).collect()),
             spoiler: None,
         }],
+    })
+}
+
+/// Several images side by side, each with alt text.
+pub fn gallery(items: &[(&str, &str)]) -> Component {
+    Component::MediaGallery(MediaGallery {
+        id: None,
+        items: items
+            .iter()
+            .map(|(url, alt)| MediaGalleryItem {
+                media: media(url),
+                description: Some(alt.chars().take(1024).collect()),
+                spoiler: None,
+            })
+            .collect(),
     })
 }
 

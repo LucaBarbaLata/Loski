@@ -15,7 +15,8 @@ pub enum AudioBitrate {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub discord_token: String,
-    pub owner_id: u64,
+    /// From `.env`; without it, the owner is whoever claims Loski (see `claim`).
+    pub owner_id: Option<u64>,
     pub spotify_client_id: String,
     pub spotify_client_secret: String,
     pub auth_port: u16,
@@ -29,13 +30,21 @@ pub struct Config {
     pub sync_profile: bool,
     /// Where "today" and "this month" are, for /stats and the monthly recap.
     pub timezone: chrono_tz::Tz,
+    /// Ask GitHub once a day whether a newer release is out.
+    pub update_check: bool,
+    /// The GitHub repository releases come from, as "owner/name".
+    pub update_repo: String,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let owner_id = required("OWNER_ID")?
-            .parse()
-            .context("OWNER_ID must be your numeric Discord user ID")?;
+        let owner_id = match optional("OWNER_ID") {
+            Some(id) => Some(
+                id.parse()
+                    .context("OWNER_ID must be your numeric Discord user ID")?,
+            ),
+            None => None,
+        };
 
         let bitrate = match optional("AUDIO_BITRATE").as_deref() {
             None | Some("auto") => AudioBitrate::Auto,
@@ -74,6 +83,9 @@ impl Config {
             bot_name: optional("BOT_NAME").unwrap_or_else(|| "Loski".to_string()),
             sync_profile: flag("SYNC_PROFILE", true),
             timezone,
+            update_check: flag("UPDATE_CHECK", true),
+            update_repo: optional("UPDATE_REPO")
+                .unwrap_or_else(|| "LucaBarbaLata/Loski".to_string()),
         })
     }
 

@@ -19,6 +19,8 @@ pub struct TrackInfo {
     /// What this song was queued from, like "the album **Discovery**", for
     /// the panel's "playing from" line.
     pub from: Option<Arc<str>>,
+    /// The friend who asked for it with /request (a Discord user id).
+    pub requested_by: Option<u64>,
 }
 
 impl TrackInfo {

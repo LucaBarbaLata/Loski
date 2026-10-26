@@ -88,6 +88,7 @@ impl Inner {
         }
         self.mixer.pipes[CONNECT_DECK].flush();
         self.mixer.solo(self.active);
+        self.connect_up_next.clear();
         self.mode = Mode::Queue;
         self.status = Status::Idle;
         self.clock.hold_at(0);
@@ -189,5 +190,6 @@ fn track_from_audio_item(item: &AudioItem) -> Option<TrackInfo> {
         explicit: item.is_explicit,
         year: None,
         from: None,
+        requested_by: None,
     })
 }

@@ -297,6 +297,10 @@ struct Inner {
     listen: Option<listen::Listen>,
     /// Songs played since Loski last left voice.
     played: Vec<Played>,
+    /// What the Spotify app has coming up, while it's in control.
+    connect_up_next: Vec<Arc<TrackInfo>>,
+    /// Friends in the call right now (Discord user ids), for the history.
+    audience: Vec<u64>,
 }
 
 pub struct Engine {
@@ -360,6 +364,8 @@ impl Engine {
                 deck_events: tx,
                 listen: None,
                 played: Vec::new(),
+                connect_up_next: Vec::new(),
+                audience: Vec::new(),
             }),
             mixer,
         });
@@ -437,6 +443,7 @@ impl Engine {
         let connect = matches!(g.mode, Mode::Connect { .. });
         let track = g.current_track();
         let up_next = match (following || connect, g.queue.repeat, &track) {
+            _ if connect => g.connect_up_next.iter().take(3).cloned().collect(),
             (true, _, _) => Vec::new(),
             (false, Repeat::Track, Some(current)) if g.status != Status::Idle => {
                 vec![current.clone()]
@@ -483,6 +490,36 @@ impl Engine {
             connect: matches!(g.mode, Mode::Connect { .. }),
             duplicates: g.queue.duplicates(),
         }
+    }
+
+    pub fn is_connect(&self) -> bool {
+        matches!(self.inner.lock().mode, Mode::Connect { .. })
+    }
+
+    /// The Spotify app's own up next, shown on the panel while it's in control.
+    pub fn set_connect_up_next(&self, tracks: Vec<TrackInfo>) {
+        let mut g = self.inner.lock();
+        if !matches!(g.mode, Mode::Connect { .. }) {
+            return;
+        }
+        let same = tracks.len() == g.connect_up_next.len()
+            && tracks
+                .iter()
+                .zip(&g.connect_up_next)
+                .all(|(a, b)| a.id == b.id);
+        if !same {
+            g.connect_up_next = tracks.into_iter().map(Arc::new).collect();
+            g.notify(Notice::Changed);
+        }
+    }
+
+    /// Who's in the call besides you, so the history knows who you listened with.
+    pub fn set_audience(&self, friends: Vec<u64>) {
+        let mut g = self.inner.lock();
+        // Time so far belongs to whoever was there before.
+        g.tick_listen();
+        g.audience = friends;
+        g.tick_listen();
     }
 
     /// What played since the last call (or since Loski started).
@@ -734,6 +771,26 @@ impl Engine {
         let count = g.queue.shuffle_upcoming();
         g.notify(Notice::Changed);
         count
+    }
+
+    /// Remembers what's coming up, for the Undo button of the change about to happen.
+    pub fn save_undo(&self) -> u64 {
+        self.inner.lock().queue.save_undo()
+    }
+
+    /// Puts back what was coming up before a change; returns how many songs that is.
+    pub fn undo(&self, id: u64) -> Result<usize, &'static str> {
+        let mut g = self.inner.lock();
+        if !matches!(g.mode, Mode::Queue) {
+            return Err("The queue isn't in charge right now, so there's nothing to undo.");
+        }
+        g.drop_pending_fade();
+        let count = g.queue.undo(id)?;
+        match g.queue.next_index(true) {
+            Some(index) if g.status == Status::Idle => g.play_index(index),
+            _ => g.notify(Notice::Changed),
+        }
+        Ok(count)
     }
 
     pub fn set_repeat(&self, repeat: Repeat) {

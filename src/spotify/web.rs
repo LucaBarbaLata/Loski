@@ -220,6 +220,27 @@ impl WebApi {
             .map(str::to_string))
     }
 
+    /// What your Spotify has coming up next (the app's queue).
+    pub async fn queue(&self) -> Result<Vec<TrackInfo>> {
+        let Some(body) = self.get(&format!("{API}/me/player/queue"), &[]).await? else {
+            return Ok(Vec::new());
+        };
+        #[derive(Deserialize)]
+        struct Queue {
+            #[serde(default)]
+            queue: Vec<serde_json::Value>,
+        }
+        let parsed: Queue = serde_json::from_str(&body).context("unexpected queue response")?;
+        // Podcast episodes and anything else that isn't a song are left out.
+        Ok(parsed
+            .queue
+            .into_iter()
+            .filter_map(|item| serde_json::from_value::<ApiTrack>(item).ok())
+            .filter_map(ApiTrack::into_track)
+            .take(5)
+            .collect())
+    }
+
     pub async fn now_listening(&self) -> Result<Option<NowListening>> {
         let Some(body) = self
             .get(
@@ -323,6 +344,7 @@ impl ApiTrack {
             explicit: self.explicit,
             year: release_date.and_then(|d| d.get(..4)?.parse().ok()),
             from: None,
+            requested_by: None,
         })
     }
 }

@@ -1,10 +1,19 @@
 # Loski 🎧
 
-A private Discord music bot that streams **real Spotify audio** (your Premium account, 320 kbps) into a voice channel. Only you can control it. Built in Rust on [librespot](https://github.com/librespot-org/librespot), [songbird](https://github.com/serenity-rs/songbird) and [twilight](https://github.com/twilight-rs/twilight), with every message drawn as a Discord card using Loski's own icon set.
+A private Discord music bot that streams **real Spotify audio** (your Premium account, 320 kbps) into a voice channel. You control it, along with any co-DJs you pick. Built in Rust on [librespot](https://github.com/librespot-org/librespot), [songbird](https://github.com/serenity-rs/songbird) and [twilight](https://github.com/twilight-rs/twilight), with every message drawn as a Discord card using Loski's own icon set.
 
 > **Heads-up:** streaming Spotify through librespot isn't allowed by Spotify's terms of service. Loski is meant for private use with your own account. Spotify could, in theory, act on an account that does this.
 >
 > Loski is an independent project. It isn't affiliated with, endorsed by or sponsored by Spotify or Discord. Spotify and Discord are trademarks of their respective owners.
+
+![The artwork Loski draws for each song on its now-playing panel](docs/images/banner.jpg)
+
+<p>
+  <img src="docs/images/stats.jpg" width="49%" alt="The /stats picture: listening time, a daily chart, top songs and top artists">
+  <img src="docs/images/wrapped.jpg" width="49%" alt="Loski Wrapped: the year's minutes and highlights">
+</p>
+
+<sub>Drawn by Loski itself: the artwork on the now-playing panel, `/stats`, and Loski Wrapped. The songs and artists are made up.</sub>
 
 ## Features
 
@@ -18,57 +27,64 @@ A private Discord music bot that streams **real Spotify audio** (your Premium ac
 - Your library and stations: `/liked`, `/playlist` (your playlists suggested as you type), `/radio`
 - Search with tabs for songs, albums, playlists and artists; right-click any message with a Spotify link to play it
 - Follow mode: mirrors whatever you're playing on your own Spotify, in sync
-- A live now-playing panel: an artwork banner Loski draws for each song, a colour taken from the cover, where the song is playing from, an icon progress bar, the next three songs, and controls
+- A live now-playing panel: a frosted-glass artwork banner Loski draws for each song, a colour taken from the cover, where the song is playing from, an icon progress bar, the next two songs with their covers (from your Spotify app's queue when it's in charge), and controls
+- Live lyrics that follow the song line by line, from the panel's Lyrics button, and `/lyrics` for any song
+- The song in the voice channel's status, so people see what's on before they join
 - When Loski leaves, the panel turns into a recap of the session, with a button to keep it as a mix
 - Search results as a card with covers: choose one, then Play now, Play next or Add to queue
 - A queue card where you can pick any song to play now, move up or remove
-- Follows you between voice channels; leaves a minute after you do
+- Follows you between voice channels; leaves a minute after you do, or stays around the clock with 24/7 mode
+- `/settings` in Discord for the panel channel, a compact panel, leaving, 24/7, crossfade, audio quality, timezone and song requests
+- My sound: your own five-band EQ, next to the sound filters
 - Remembers your volume and crossfade settings; keeps a listening history you can replay from (`/history`)
-- Listening stats as a picture: time, top songs and artists, streaks and a daily chart (`/stats`), plus a recap in your DMs on the 1st of each month
+- Listening stats as a picture: time, top songs, artists and genres, streaks and a daily chart (`/stats`), who you listen with, a recap in your DMs on the 1st of each month, and Loski Wrapped on January 1st (`/wrapped`)
+- A Blend mix every Monday: your top songs woven with what friends liked or asked for
+- Small DMs for milestones: 100 hours with Loski, your 1,000th song, 30 days in a row
 - Saved mixes: keep a queue under a name, load, rename or delete it later (`/mix`, or "Save as mix" on the queue card)
-- Song requests: anyone in the server can `/request` a song, and you decide with one click
+- Song requests: anyone in the server can `/request` a song; waiting requests gather on one card
+- Friends: co-DJs by name or with a DJ role, a ♥ on the panel for everyone in the call, votes to skip, and who's listening
+- Smart shuffle: songs by the same artist don't play back to back
 - Queue tools: remove a run of songs, drop repeats (`/dedupe`), move a song to play next
-- `/status` to check on Spotify, Discord and the audio at a glance
+- `/status` to check on Spotify, Discord and the audio at a glance, and a DM when a new Loski release is out
 - Fixes itself where it can: rejoins voice after a dropout, reconnects to Spotify, and DMs you when something needs you
-- Cleans up after itself: confirmations disappear after a few seconds
+- Cleans up after itself: confirmations disappear after a few seconds, and queue changes can be undone for a moment
 
 ## Setup
 
-You need Docker Desktop and Spotify Premium.
+You need Docker (Docker Desktop on Windows and macOS) and Spotify Premium.
 
-### 1. Create the Discord bot
+### 1. Start it
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and click **New Application**. Name it **Loski**.
-2. Open **Bot**, click **Reset Token** and copy the token.
-3. Invite it to your server (replace `APP_ID` with the Application ID from **General Information**):
-
-   ```
-   https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=3230720
-   ```
-
-   That grants View Channels, Send Messages, Embed Links, Read Message History, Connect and Speak. No privileged intents are needed.
-
-### 2. Create the Spotify app
-
-1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and click **Create app**.
-2. Set the redirect URI to exactly `http://127.0.0.1:5588/callback` and tick **Web API**.
-3. Copy the **Client ID** and **Client Secret**.
-
-### 3. Configure
-
-Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN`, `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. `OWNER_ID` is already set to your Discord account.
-
-### 4. Start it
-
-Double-click `loski.cmd`, or run it from a terminal in the repo folder:
+On Windows, double-click `loski.cmd`, or run it from a terminal in the repo folder:
 
 ```powershell
 .\loski start
 ```
 
-It starts Docker Desktop if it isn't running, downloads the ready-made Loski image the first time (see [Prebuilt image](#prebuilt-image)), and waits until Loski says it's ready.
+On Linux or macOS (see [Linux, macOS and Raspberry Pi](#linux-macos-and-raspberry-pi)):
 
-The first time, Loski sends you a DM asking you to open **http://127.0.0.1:5588** on this computer. That page walks you through two Spotify approvals: one for streaming, one for search. After that you never need to log in again. The login is stored in `./data`.
+```bash
+./loski.sh start
+```
+
+It starts Docker if it isn't running, downloads the ready-made Loski image the first time (see [Prebuilt image](#prebuilt-image)), and waits until Loski says it's ready.
+
+### 2. The setup page
+
+The first time, your browser opens **http://127.0.0.1:5588**, which asks for three keys and shows where to get each one:
+
+1. **A Discord bot.** At [discord.com/developers/applications](https://discord.com/developers/applications), click **New Application**, name it **Loski**, open **Bot**, click **Reset Token** and copy the token.
+2. **A Spotify app.** At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), click **Create app**, set the redirect URI to exactly `http://127.0.0.1:5588/callback`, tick **Web API**, and copy the **Client ID** and **Client Secret**.
+
+The page checks them with Discord and Spotify and saves them in `data/setup.env`. (You can put them in `.env` yourself instead; `.env` always wins. See `.env.example`.)
+
+### 3. Invite, claim and log in
+
+Once the keys are saved, the same page shows the rest:
+
+1. **Invite Loski** to your server with the button. It asks for View Channels, Send Messages, Embed Links, Read Message History, Connect, Speak and Set Voice Channel Status (for the song under the channel's name). No privileged intents are needed.
+2. **Make it yours.** Send Loski a direct message saying `claim` and the six-digit code on the page (it's in the log too, and `loski start` prints it). Whoever sends it first becomes the owner, and the code is only on this computer, so nobody else in the server can beat you to it. Setting `OWNER_ID` in `.env` skips this.
+3. **Log in to Spotify**: two quick approvals, one for streaming and one for search. After that you never need to log in again. The login is stored in `./data`.
 
 ### Day to day
 
@@ -82,8 +98,30 @@ The first time, Loski sends you a DM asking you to open **http://127.0.0.1:5588*
 | `.\loski logs` | Follow the live log. `.\loski logs files` opens the saved daily logs. |
 | `.\loski status` | Whether Loski is running, and its last log lines. |
 | `.\loski selftest` | Check the Spotify connection, search, radio and your library from inside Loski. |
+| `.\loski backup` | Save your history, mixes, likes, settings, `.env` and Spotify login to `loski-backup-<date>.tar.gz`. |
+| `.\loski restore <file>` | Bring a backup back, here or on another computer, and start Loski. What was there before is kept in `data.before-restore-<time>`. |
 
-`loski.cmd` runs `scripts/loski.ps1` with permission to run just that script, so you don't have to change PowerShell's script policy. Plain `docker compose pull`, `docker compose up -d` and `docker compose down` work too.
+`loski.cmd` runs `scripts/loski.ps1` with permission to run just that script, so you don't have to change PowerShell's script policy. On Linux and macOS, `./loski.sh` takes the same commands. Plain `docker compose pull`, `docker compose up -d` and `docker compose down` work too.
+
+A backup holds your Discord token and Spotify login, so keep it somewhere private; `.gitignore` already keeps it out of the repo.
+
+### Linux, macOS and Raspberry Pi
+
+`loski.sh` does on Linux and macOS what `loski.cmd` does on Windows. If `./loski.sh` says permission denied, make it runnable once (or run it as `bash loski.sh`):
+
+```bash
+chmod +x loski.sh
+```
+
+- **Docker.** On macOS, `./loski.sh start` opens Docker Desktop if it isn't running. On Linux, install Docker Engine with the Compose plugin ([docs.docker.com/engine/install](https://docs.docker.com/engine/install/)) and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log out and in). The script tells you if either is missing.
+- **Your files stay yours.** On Linux, `loski.sh` runs Loski as your own user, so `data/` belongs to you and backups and restores need no `sudo`. (Running plain `docker compose` instead uses user 10001, which then needs to own `data/`.)
+- **Raspberry Pi.** A Pi 4 or 5 on a 64-bit OS runs the ARM image. The setup and Spotify pages only open on the computer Loski runs on, so on a Pi without a screen either set Loski up on your laptop first and move it with `backup` and `restore`, or reach the pages through SSH: `ssh -L 5588:127.0.0.1:5588 -L 8898:127.0.0.1:8898 pi@raspberrypi`, then open http://127.0.0.1:5588 on the laptop.
+
+### Moving to another computer
+
+1. On the old one: `loski backup` (or `./loski.sh backup`), then stop Loski there so it isn't logged in twice.
+2. Copy `loski-backup-<date>.tar.gz` into the Loski folder on the new one (clone the repo, or just `docker-compose.yml` and a launcher).
+3. On the new one: `loski restore loski-backup-<date>.tar.gz`. It unpacks everything, keeps whatever was there before, and starts Loski: same history, mixes, settings and Spotify login, no setup page.
 
 ### Prebuilt image
 
@@ -95,6 +133,8 @@ Every push to `main` that passes the checks publishes an image to GitHub's conta
 | `ghcr.io/lucabarbalata/loski:sha-1a2b3c4` | One particular commit, for going back to a version that worked. |
 | `ghcr.io/lucabarbalata/loski:1.2.0` | A release, when a `v1.2.0` tag is pushed. |
 
+A `v1.2.0` tag also becomes a GitHub release, with the `1.2.0` part of `CHANGELOG.md` as its notes, once both images are up. That's what Loski's "a new version is out" DM reads, so every release needs its section in the changelog (the release job stops with an error otherwise). Tags with a dash, like `v1.3.0-beta.1`, become pre-releases, which nobody gets a DM about.
+
 Each tag holds two builds, and Docker picks the right one by itself: `linux/amd64` for 64-bit Intel and AMD machines, and `linux/arm64` for 64-bit ARM, like a Raspberry Pi 4 or 5 on a 64-bit OS, an Apple Silicon Mac or an ARM server. Both are built natively on GitHub's own machines, side by side. To run Loski without the rest of the repo, `docker-compose.yml` and a filled-in `.env` are enough: `docker compose up -d` downloads the image.
 
 ## Commands
@@ -102,7 +142,7 @@ Each tag holds two builds, and Docker picks the right one by itself: `linux/amd6
 | Command | What it does |
 | --- | --- |
 | `/play song [next]` | Search, or paste a Spotify link. `next:True` puts it right after the current song. |
-| `/liked [shuffle]` | Your Liked Songs (shuffled unless you say otherwise). |
+| `/liked [shuffle] [from]` | Your Liked Songs (shuffled unless you say otherwise), or `from:friends` for the songs your friends liked on the panel. |
 | `/playlist name [shuffle]` | One of your playlists; start typing to see them. |
 | `/radio [song]` | Spotify's radio for a song, or for the one playing. Replaces what's coming up. |
 | `/pause`, `/resume` | Pause and resume. |
@@ -120,40 +160,81 @@ Each tag holds two builds, and Docker picks the right one by itself: `linux/amd6
 | `/repeat mode` | Off, this song, or the queue. |
 | `/volume [level]` | 0–100. Remembered between sessions. |
 | `/crossfade [seconds]` | 0–12 seconds. 0 means gapless. Songs from the same album always play gapless. |
-| `/filter sound` | Bass boost, treble boost, vocal boost, nightcore, slowed + reverb, 8D, or off. |
+| `/filter sound` | Bass boost, treble boost, vocal boost, nightcore, slowed + reverb, 8D, My sound, or off. |
 | `/sleep when` | Fade out and leave in 15 minutes to 2 hours, after this song, or cancel. |
 | `/normalize [on]` | Volume levelling between songs, like Spotify's setting. Remembered. |
 | `/follow` | Toggle follow mode. |
-| `/history` | Recently played songs; pick one to play it again. |
-| `/stats [range]` | Listening time, top songs and artists, streaks and when you listen. Tabs for the last 7 days, this month and all time, and a button that queues your top songs. |
+| `/lyrics [song]` | Lyrics for any song, a page at a time (the one playing if you leave it out). Start typing to search. |
+| `/history [search] [when] [with] [requests]` | Recently played songs, or search them: words from the title or artist, today / the last 7 or 30 days / the last year, songs with a friend in the call, or only friends' requests. Pick one to play it again. |
+| `/stats [range]` | Listening time, top songs, artists and genres, streaks and when you listen. Tabs for the last 7 days, this month, all time and Together (time and songs with each friend), and a button that queues your top songs. |
+| `/wrapped [year]` | Loski Wrapped: your year (so far) in two pictures. It also arrives in your DMs on January 1st. |
 | `/mix save name` | Save every song in the queue (played ones too) under a name. Saving under a name you used replaces it. |
 | `/mix load name [shuffle] [next]` | Add a saved mix to the queue. |
-| `/mix list`, `/mix delete name` | See your mixes (and add one from the menu), or delete one. Up to 25. |
+| `/mix list`, `/mix delete name` | See your mixes (and add one from the menu), or delete one. Up to 25. **Blend** is remade every Monday. |
 | `/status` | Whether Spotify, Discord and the audio are healthy: login, response times, voice server, bitrate, buffer, uptime. |
-| `/request song` | For everyone in the server: ask for a song. You get a card with Play next, Add to queue and Decline. |
-| `/stop` | Stop, clear the queue and leave. |
+| `/request song` | For everyone in the server: ask for a song. Waiting requests gather on one card where you or a co-DJ play them next, add them or decline them. A co-DJ's own requests go straight into the queue. |
+| `/settings` | Everything you can change without editing `.env`, in one card only you can see. |
+| `/stop` | Stop, clear the queue and leave. With 24/7 on, Loski stays away until the next `/play`. |
 | `/help` | Everything Loski can do. |
 | Right-click → Apps → Play with Loski / Queue with Loski | Plays the Spotify link in that message, now or at the end of the queue. |
 
 The queue card lets you pick a song to play now, play next or remove, saves the queue as a mix, and offers to remove repeats when there are any. The `/mix list` card does the same for mixes: add one to the queue, play it next, rename or delete it.
 
-The panel's buttons cover previous, play/pause, skip, shuffle, repeat, volume, queue, open in Spotify and stop. Its More menu jumps 15 seconds back or forward, jumps to a time you type, restarts the song, or moves the panel to the bottom of the chat. When the queue runs out, the panel offers to replay it.
+The panel's buttons cover previous, play/pause, skip, shuffle, repeat, volume, queue, lyrics and stop, with an Open in Spotify link under them. Its More menu jumps 15 seconds back or forward, jumps to a time you type, restarts the song, starts a radio from it, switches the sound filter, or moves the panel to the bottom of the chat. When the queue runs out, the panel offers to replay it.
+
+`/clear`, `/remove`, `/dedupe` and `/shuffle` answer with an Undo button that puts the queue back as it was, for 15 seconds.
+
+The Lyrics button posts a card under the panel that follows the song: the line being sung, the one before and the next few, with a button for all of them. It moves on to the next song by itself, and goes away with Close or when Loski leaves.
 
 The artwork banner is drawn with the bundled Bricolage Grotesque and Noto Sans fonts (SIL Open Font License, see `assets/fonts`). Titles in scripts they don't cover, such as Japanese or Arabic, use a compact layout with the cover as a thumbnail instead.
+
+## Settings
+
+`/settings` opens a card only you can see. Every change is saved in `data/preferences.json` and used straight away, no restart:
+
+- **Panel channel.** Pick a channel and the panel always goes there, instead of wherever you last used `/play`. Clear it to go back.
+- **Panel look.** Full, with the artwork and up next, or compact: no artwork, one row of buttons, and the rest (volume, lyrics, shuffle, repeat) in the More menu. Handy on a phone.
+- **24/7.** Loski stays in its voice channel instead of leaving, and comes back to it after a restart or an update. When the queue runs out it keeps going with a Spotify radio from the last song. While nobody's in the channel the music pauses, so it doesn't play to an empty room or count in your stats, and it carries on when someone joins. `/stop` (or Leave on the panel) sends it away until the next `/play`.
+- **Leaving.** How long Loski waits after you leave the call, and after the music ends.
+- **Sound.** Crossfade, volume levelling and the audio quality sent to Discord.
+- **My sound.** Bass, low-mid, mid, high-mid and treble, each from -8 to +8 dB. Turn it on from the card, the panel's More menu or `/filter`.
+- **Timezone.** When days start for `/stats` and the monthly recap.
+- **Friends.** Co-DJs, song requests and votes to skip; see below.
+
+The settings in `.env` (`LEAVE_AFTER_SECS`, `IDLE_LEAVE_SECS`, `AUDIO_BITRATE`, `TIMEZONE`, `NORMALISE`) still work as starting values; anything changed in `/settings` wins.
+
+## Friends
+
+Nobody but you controls Loski until you say so, in `/settings` → Friends:
+
+- **Co-DJs.** Pick people by name, or a role (say, **DJ**) and everyone who has it. Co-DJs either control everything (pause, skip, volume, the queue, filters, stop) or only add songs. Your Spotify library, stats, history, mixes and settings stay yours either way.
+- **Likes.** Everyone in the call can press ♥ on the panel. It never changes the music; the recap shows the most liked songs, and `/liked from:friends` plays what your friends liked.
+- **Who's listening.** The panel names who's in the call, and the recap says who you listened with and for how long.
+- **Votes to skip.** Anyone in the call who isn't a co-DJ can press Skip to vote; once more than half the call has, the song skips. You can turn it off.
+- **Requests.** `/request` adds to one card with every waiting request, where you or a co-DJ answer them one by one or all at once.
+
+Loski leaves a minute after the last person who runs it (you or a co-DJ) leaves the call, unless 24/7 is on.
 
 ## Good to know
 
 - **When something breaks.** If voice drops, Loski rejoins on its own (and tells you if it can't). If the Spotify connection stays down, or Spotify signs it out of search, you get a DM with what to do, and another when it's fixed.
 - **Logs.** Besides `docker logs`, Loski writes a log file per day to `data/logs` and keeps the last 14 days, so you can see what happened even after a restart.
 
-- **Stats and history.** A song counts once it has played for 30 seconds (half of it for very short songs), the same rule Spotify uses, and only the time it actually played is added up. Days and months start at midnight in `TIMEZONE`, which is UTC unless you set it in `.env` (for example `TIMEZONE=Europe/Bucharest`). On the 1st of each month Loski DMs you a recap of the month before; if it was off that day, the recap comes the next time it starts. History lives in `data/history.jsonl` and mixes in `data/mixes.json`.
+- **Stats and history.** A song counts once it has played for 30 seconds (half of it for very short songs), the same rule Spotify uses, and only the time it actually played is added up. Days and months start at midnight in your timezone, which is UTC until you set it in `/settings` (or `TIMEZONE=Europe/Bucharest` in `.env`). On the 1st of each month Loski DMs you a recap of the month before, and on January 1st Loski Wrapped for the year; if it was off that day, they come the next time it starts. History lives in `data/history.jsonl`, mixes in `data/mixes.json` and likes in `data/likes.jsonl`.
+- **Genres** come from [MusicBrainz](https://musicbrainz.org), the open music encyclopedia, because Spotify no longer shares artist genres with apps like Loski. Loski looks up the artists you play most, about one a second in the background, and keeps the answers in `data/genres.json`; artists MusicBrainz doesn't know are left out. Only artist names are sent.
+- **Blend** is rebuilt every Monday (or the first time Loski runs after one) from your 30 most played songs of the last four weeks and up to 30 that friends liked or asked for, taking turns. It's saved as the mix **Blend**, so `/mix load name:Blend` plays it.
+- **Milestones** (10, 25, 50, 100… hours; 100, 500, 1,000… songs; 7, 14, 30… days in a row) arrive as DMs. The ones you'd already passed when you updated aren't sent.
+
+- **Lyrics** come from Spotify (the same ones its app shows, timed to the song), or from [LRCLIB](https://lrclib.net) when Spotify has none. Some songs have them only as plain text; then the card shows them a page at a time instead of following along.
+- **Voice channel status.** If Loski's role doesn't have Set Voice Channel Status (invited before 2.0, say), everything else works and the log says once how to turn it on: Server Settings → Roles → Loski → Set Voice Channel Status.
+- **Updates.** Once a day Loski checks GitHub for a newer release and DMs you about it once. `UPDATE_CHECK=false` turns that off.
 
 - **Audio quality.** Loski sends Discord the highest bitrate your server's boost level allows: 96 kbps unboosted, up to 384 kbps at level 3. You can set it yourself with `AUDIO_BITRATE`.
 - **Spotify Connect.** Loski shows up as a speaker in your Spotify app whenever it's running. Pick it and Loski joins the voice channel you're in and plays there; the app's play, skip, seek and volume all work, and Discord's buttons control it too. Pick another device to hand back. Running `/play` takes over again with the Discord queue.
 - **Follow mode** plays the same song as your Spotify, at the same position. Your own device keeps playing too, so mute it to avoid hearing it twice. Pausing from Discord sticks until you change something in Spotify.
 - **Spotify history and Wrapped.** Songs played through Loski don't count, because librespot doesn't report plays to Spotify. Loski keeps its own history instead.
 - **Leaving.** Loski leaves 1 minute after you leave voice (`LEAVE_AFTER_SECS`), or 5 minutes after the queue runs out (`IDLE_LEAVE_SECS`). The queue isn't saved between sessions.
-- **Other people** can listen and `/request` songs, but only `OWNER_ID` can use the other commands and the buttons.
+- **Other people** can listen, `/request` songs, like and vote to skip. Only the owner (`OWNER_ID`, or whoever claimed Loski) and the co-DJs they pick can use the other commands and buttons. A claimed owner is remembered in `data/owner`; delete it to claim Loski again.
 - **Profile and icons.** On startup Loski sets its own name, avatar, banner and "About me" from `assets/`, and uploads its icons as its own emojis. Art is only re-uploaded when it changes. Set `SYNC_PROFILE=false` to leave the profile alone, or `BOT_NAME` to call it something else.
 - **Restarting.** `docker compose down` or a restart makes Loski leave voice and remove its panel first, so it never looks stuck in a channel.
 

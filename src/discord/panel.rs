@@ -1,5 +1,6 @@
 //! The live "now playing" card: one per session, kept at the bottom of the
-//! channel you last used /play in, updated as the song plays.
+//! channel you last used /play in (or the one picked in /settings), updated
+//! as the song plays.
 
 use std::{
     sync::{
@@ -25,6 +26,7 @@ use twilight_model::{
 use super::{
     App, Core, ERROR_SECS,
     cards::{self, Btn, color},
+    friends::{self, RoomView},
     icons::{Icon, Icons},
     voice,
 };
@@ -44,14 +46,29 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// Small changes (volume, repeat) are batched for this long.
 const DEBOUNCE: Duration = Duration::from_millis(900);
 const QUEUE_PAGE_SIZE: usize = 10;
+/// Songs shown under "up next" on the panel.
+const UP_NEXT_SHOWN: usize = 2;
 /// Songs shown by /history.
 pub const HISTORY_SIZE: usize = 15;
+/// Of those, the newest few shown with their covers.
+const HISTORY_COVERS: usize = 5;
 const BAR_SEGMENTS: usize = 12;
 
 pub(super) type PanelRef = (Id<ChannelMarker>, Id<MessageMarker>);
 
+/// How the panel is drawn, from /settings.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Look {
+    /// The slim panel: no artwork, one row of buttons.
+    pub compact: bool,
+    /// 24/7 is on, so Loski isn't about to leave when the music ends.
+    pub staying: bool,
+}
+
 struct UiState {
     home: Option<Id<ChannelMarker>>,
+    /// The panel channel picked in /settings; it beats `home`.
+    fixed: Option<Id<ChannelMarker>>,
     panel: Option<PanelRef>,
     /// The banner uploaded with the current panel, and the song it shows.
     banner: Option<(SpotifyId, String)>,
@@ -73,6 +90,7 @@ impl Default for Ui {
         Self {
             state: Mutex::new(UiState {
                 home: None,
+                fixed: None,
                 panel: None,
                 banner: None,
                 color: color::BRAND,
@@ -91,14 +109,24 @@ impl Ui {
     }
 
     pub fn home(&self) -> Option<Id<ChannelMarker>> {
-        self.state.lock().home
+        let st = self.state.lock();
+        st.fixed.or(st.home)
+    }
+
+    /// Keeps the panel in one channel (`None`: wherever /play was used).
+    pub fn set_fixed(&self, channel: Option<Id<ChannelMarker>>) {
+        self.state.lock().fixed = channel;
+    }
+
+    pub fn has_panel(&self) -> bool {
+        self.state.lock().panel.is_some()
     }
 
     pub fn color(&self) -> u32 {
         self.state.lock().color
     }
 
-    fn mark_dirty(&self) {
+    pub(super) fn mark_dirty(&self) {
         self.state.lock().dirty = true;
     }
 
@@ -164,21 +192,30 @@ async fn on_notice(app: &Arc<App>, core: &Core, notice: Notice) {
                 None => color::BRAND,
             };
             app.ui.state.lock().color = accent;
+            friends::song_changed(app, &track);
             app.set_listening(Some(&track.display()));
+            if core.engine.is_connect() {
+                super::refresh_connect_queue(core).await;
+            }
             repost(app, core).await;
+            voice::show_song(app, Some(&track)).await;
         }
         Notice::Changed => app.ui.mark_dirty(),
         Notice::QueueEnded => {
             // The panel itself turns into the "last song" card.
             app.ui.mark_dirty();
             app.set_listening(None);
-            voice::schedule_idle_leave(app);
+            voice::show_song(app, None).await;
+            voice::queue_ended(app);
         }
         Notice::ConnectStarted => voice::join_for_connect(app, core).await,
-        Notice::SleepReached => voice::leave(app, Some(personality::sleep_reached())).await,
+        Notice::SleepReached => {
+            voice::send_away(app, Some(personality::sleep_reached())).await;
+        }
         Notice::ConnectEnded => {
             app.ui.mark_dirty();
             app.set_listening(None);
+            voice::show_song(app, None).await;
             voice::schedule_idle_leave(app);
         }
         Notice::Unavailable(track) => {
@@ -242,20 +279,24 @@ pub async fn repost(app: &App, core: &Core) {
         let _ = app.http.delete_message(channel, message).await;
     }
     let snap = core.engine.snapshot();
+    let look = app.look();
     let banner = match &snap.track {
-        Some(track) => banner::for_track(&app.web, track).await,
-        None => None,
+        Some(track) if !look.compact => banner::for_track(&app.web, track).await,
+        _ => None,
     };
     let attachments: Vec<Attachment> = banner
         .iter()
         .map(|jpeg| Attachment::from_bytes(banner::FILENAME.to_string(), jpeg.to_vec(), 1))
         .collect();
     let reference = format!("attachment://{}", banner::FILENAME);
+    let room = friends::room_view(app, snap.track.as_deref());
     let components = [now_playing_card(
         &app.icons,
         app.ui.color(),
         &snap,
         banner.as_ref().map(|_| reference.as_str()),
+        look,
+        &room,
     )];
 
     let mut posted = None;
@@ -419,7 +460,14 @@ fn progress_bar(icons: &Icons, position_ms: u32, duration_ms: u32) -> String {
 /// The panel as it should look right now, with this song's banner if one was uploaded.
 pub fn current_card(app: &App, snap: &Snapshot) -> Component {
     let banner = app.ui.banner_for(snap);
-    now_playing_card(&app.icons, app.ui.color(), snap, banner.as_deref())
+    now_playing_card(
+        &app.icons,
+        app.ui.color(),
+        snap,
+        banner.as_deref(),
+        app.look(),
+        &friends::room_view(app, snap.track.as_deref()),
+    )
 }
 
 pub fn now_playing_card(
@@ -427,6 +475,8 @@ pub fn now_playing_card(
     accent: u32,
     snap: &Snapshot,
     banner: Option<&str>,
+    look: Look,
+    room: &RoomView,
 ) -> Component {
     let Some(track) = &snap.track else {
         let text = if snap.following {
@@ -448,7 +498,7 @@ pub fn now_playing_card(
     };
 
     let mut parts = Vec::new();
-    match banner {
+    match banner.filter(|_| !look.compact) {
         Some(url) => {
             let alt = format!("{} by {}", track.title, track.artists_joined());
             parts.push(cards::image(url, &alt));
@@ -469,9 +519,12 @@ pub fn now_playing_card(
     }
 
     if finished {
-        parts.push(cards::text(format!(
-            "-# {kicker}\nI'll head out in a few minutes unless you `/play` something."
-        )));
+        let plan = if look.staying {
+            "24/7 is on, so I'm staying. `/play` something, or start a radio."
+        } else {
+            "I'll head out in a few minutes unless you `/play` something."
+        };
+        parts.push(cards::text(format!("-# {kicker}\n{plan}")));
         parts.push(cards::row(vec![
             Btn::icon("loski:radio", Icon::Radio)
                 .with_label("Radio from this song")
@@ -494,39 +547,30 @@ pub fn now_playing_card(
         Some(from) if !snap.following && !snap.connect => format!(" · from {from}"),
         _ => String::new(),
     };
-    let progress = format!(
+    let mut progress = format!(
         "-# {kicker}{from}\n`{}` {} `{}`",
         fmt_ms(snap.position_ms as u64),
         progress_bar(icons, snap.position_ms, track.duration_ms),
         fmt_ms(track.duration_ms as u64)
     );
-    parts.push(cards::text(progress));
-
-    let up_next = if snap.following {
-        "-# UP NEXT\nWhatever you play next on Spotify".to_string()
-    } else if snap.connect {
-        "-# UP NEXT\nYour Spotify app is in charge. Pick another device there to go back to the queue."
-            .to_string()
-    } else if snap.up_next.is_empty() {
-        "-# UP NEXT\nNothing yet. `/play` to add more".to_string()
-    } else {
-        let mut lines = vec!["-# UP NEXT".to_string()];
-        for (i, t) in snap.up_next.iter().enumerate() {
-            let repeat = if snap.repeat == Repeat::Track {
-                " (on repeat)"
-            } else {
-                ""
-            };
-            lines.push(format!(
-                "`{}` **{}** · {} `{}`{repeat}",
-                i + 1,
-                escape_md(&truncate(&t.title, 48)),
-                escape_md(&truncate(&t.artists_joined(), 32)),
-                fmt_ms(t.duration_ms as u64)
+    if look.compact {
+        // Up next as one line instead of a list with covers.
+        if let Some(next) = snap.up_next.first().filter(|_| !snap.following) {
+            progress.push_str(&format!(
+                "\n-# Next: **{}** · {}",
+                escape_md(&truncate(&next.title, 60)),
+                escape_md(&truncate(&next.artists_joined(), 40))
             ));
         }
-        lines.join("\n")
-    };
+        parts.push(cards::text(progress));
+        parts.extend(room_line(icons, room));
+    } else {
+        parts.push(cards::text(progress));
+        parts.extend(room_line(icons, room));
+        parts.push(cards::gap());
+        parts.extend(up_next(snap));
+        parts.push(cards::gap());
+    }
 
     let playing = matches!(snap.status, Status::Playing | Status::Loading);
     let idle = snap.status == Status::Idle;
@@ -545,20 +589,45 @@ pub fn now_playing_card(
         ButtonStyle::Success
     };
 
+    let prev = Btn::icon("loski:prev", Icon::Prev)
+        .disabled(!transport)
+        .build(icons);
+    let toggle = Btn::icon(
+        "loski:toggle",
+        if playing { Icon::Pause } else { Icon::Play },
+    )
+    .with_label(if playing { "Pause" } else { "Play" })
+    .style(ButtonStyle::Primary)
+    .disabled(idle)
+    .build(icons);
+    let skip = Btn::icon("loski:skip", Icon::Next)
+        .disabled(!transport || idle)
+        .build(icons);
+    let stop = Btn::icon("loski:stop", Icon::Stop)
+        .style(ButtonStyle::Danger)
+        .build(icons);
+    let footer = footer(snap, track);
+    if look.compact {
+        parts.extend([
+            cards::row(vec![
+                prev,
+                toggle,
+                skip,
+                Btn::icon("loski:queue", Icon::Queue)
+                    .disabled(!queue_mode)
+                    .build(icons),
+                stop,
+            ]),
+            cards::row(vec![more_menu(icons, snap, true)]),
+            cards::text(footer),
+        ]);
+        return cards::card(Some(accent), parts);
+    }
+
     let controls = cards::row(vec![
-        Btn::icon("loski:prev", Icon::Prev)
-            .disabled(!transport)
-            .build(icons),
-        Btn::icon(
-            "loski:toggle",
-            if playing { Icon::Pause } else { Icon::Play },
-        )
-        .style(ButtonStyle::Primary)
-        .disabled(idle)
-        .build(icons),
-        Btn::icon("loski:skip", Icon::Next)
-            .disabled(!transport || idle)
-            .build(icons),
+        prev,
+        toggle,
+        skip,
         Btn::icon("loski:shuffle", Icon::Shuffle)
             .disabled(!queue_mode || snap.upcoming < 2)
             .build(icons),
@@ -578,73 +647,22 @@ pub fn now_playing_card(
             .with_label("Queue")
             .disabled(!queue_mode)
             .build(icons),
-        cards::link(&track.url(), "Spotify"),
-        Btn::icon("loski:stop", Icon::Stop)
-            .style(ButtonStyle::Danger)
+        Btn::icon("loski:lyrics", Icon::Lyrics)
+            .with_label("Lyrics")
             .build(icons),
+        stop,
     ]);
-    let sound_menu = cards::row(vec![cards::select(
-        "loski:filter",
-        "Sound",
-        idle,
-        Filter::ALL
-            .iter()
-            .map(|&filter| {
-                let mut option = cards::option(
-                    format!("Sound: {}", filter.label()),
-                    filter.key(),
-                    Some(filter.description().to_string()),
-                    None,
-                );
-                option.default = filter == snap.filter;
-                option
-            })
-            .collect(),
-    )]);
-    let more_menu = cards::row(vec![cards::select(
-        "loski:more",
-        "More",
-        snap.following || idle,
-        vec![
-            cards::option(
-                "Back 15 seconds",
-                "back15",
-                None,
-                Some(icons.emoji(Icon::Back15)),
-            ),
-            cards::option(
-                "Forward 15 seconds",
-                "fwd15",
-                None,
-                Some(icons.emoji(Icon::Fwd15)),
-            ),
-            cards::option(
-                "Start radio from this song",
-                "radio",
-                Some("Replaces what's coming up".to_string()),
-                Some(icons.emoji(Icon::Radio)),
-            ),
-            cards::option(
-                "Jump to a time…",
-                "seek",
-                Some("Like 1:23, or +30 from here".to_string()),
-                Some(icons.emoji(Icon::Search)),
-            ),
-            cards::option(
-                "Restart this song",
-                "restart",
-                None,
-                Some(icons.emoji(Icon::Prev)),
-            ),
-            cards::option(
-                "Move this panel to the bottom",
-                "repost",
-                Some("Handy after a busy chat".to_string()),
-                Some(icons.emoji(Icon::Music)),
-            ),
-        ],
-    )]);
+    parts.extend([
+        controls,
+        second_row,
+        cards::row(vec![more_menu(icons, snap, false)]),
+        cards::text(footer),
+    ]);
+    cards::card(Some(accent), parts)
+}
 
+/// The small print under the buttons: volume, what's left, the modes that are on.
+fn footer(snap: &Snapshot, track: &TrackInfo) -> String {
     let mut footer = vec![format!("{}% volume", snap.volume)];
     if snap.upcoming > 0 {
         footer.push(format!(
@@ -673,19 +691,189 @@ pub fn now_playing_card(
     if snap.connect {
         footer.push("Spotify Connect".to_string());
     }
-    footer.push("Spotify 320 kbps".to_string());
+    footer.push(format!("[Open in Spotify]({})", track.url()));
+    format!("-# {}", footer.join("  ·  "))
+}
 
-    parts.extend([
-        cards::divider(),
-        cards::text(up_next),
-        cards::divider(),
-        controls,
-        second_row,
-        more_menu,
-        sound_menu,
-        cards::text(format!("-# {}", footer.join("  ·  "))),
+/// Who's listening and who liked this song, with the heart anyone in the
+/// call can press. Nothing while Loski isn't in voice.
+fn room_line(icons: &Icons, room: &RoomView) -> Option<Component> {
+    if room.listeners.is_empty() {
+        return None;
+    }
+    let mut text = format!("-# LISTENING\n{}", friends::names_list(&room.listeners, 4));
+    if !room.liked_by.is_empty() {
+        text.push_str(&format!(
+            "  ·  {} {}",
+            icons.md(Icon::Liked),
+            friends::names_list(&room.liked_by, 3)
+        ));
+    }
+    if let Some((votes, needed)) = room.votes {
+        text.push_str(&format!("  ·  skip votes {votes} of {needed}"));
+    }
+    let label = match room.liked_by.len() {
+        0 => "Like".to_string(),
+        n => n.to_string(),
+    };
+    let heart = Btn::icon("loski:like", Icon::Liked)
+        .with_label(&label)
+        .build(icons);
+    Some(cards::section(text, heart))
+}
+
+/// Up next, each song with its cover, the way the Spotify app lists it.
+fn up_next(snap: &Snapshot) -> Vec<Component> {
+    if snap.following {
+        return vec![cards::text("-# UP NEXT\nWhatever you play next on Spotify")];
+    }
+    if snap.up_next.is_empty() {
+        return vec![cards::text(if snap.connect {
+            "-# UP NEXT\nYour Spotify app is in charge. Pick another device there to go back to the queue."
+        } else {
+            "-# UP NEXT\nNothing yet. `/play` to add more"
+        })];
+    }
+    let heading = if snap.connect {
+        "-# UP NEXT IN YOUR SPOTIFY APP"
+    } else {
+        "-# UP NEXT"
+    };
+    let mut parts = vec![cards::text(heading)];
+    for t in snap.up_next.iter().take(UP_NEXT_SHOWN) {
+        let repeat = if snap.repeat == Repeat::Track && !snap.connect {
+            " · on repeat"
+        } else {
+            ""
+        };
+        let line = format!(
+            "**{}**\n-# {} · {}{repeat}",
+            escape_md(&truncate(&t.title, 60)),
+            escape_md(&truncate(&t.artists_joined(), 48)),
+            fmt_ms(t.duration_ms as u64)
+        );
+        parts.push(cards::text_with_cover(line, t.cover_thumb_url.as_deref()));
+    }
+    parts
+}
+
+/// One menu for everything that doesn't need its own button: jumping
+/// around, radio, the sound filters and moving the panel. The compact panel
+/// also keeps the buttons it has no room for here.
+fn more_menu(icons: &Icons, snap: &Snapshot, compact: bool) -> Component {
+    let mut options = Vec::new();
+    if compact {
+        let queue_mode = !snap.following && !snap.connect;
+        options.extend([
+            cards::option(
+                "Volume up",
+                "volup",
+                Some(format!("Now {}%", snap.volume)),
+                Some(icons.emoji(Icon::VolUp)),
+            ),
+            cards::option(
+                "Volume down",
+                "voldown",
+                None,
+                Some(icons.emoji(Icon::VolDown)),
+            ),
+            cards::option("Lyrics", "lyrics", None, Some(icons.emoji(Icon::Lyrics))),
+        ]);
+        if queue_mode {
+            options.extend([
+                cards::option(
+                    "Shuffle what's coming up",
+                    "shuffle",
+                    None,
+                    Some(icons.emoji(Icon::Shuffle)),
+                ),
+                cards::option(
+                    format!("Repeat: {} (change)", snap.repeat.label()),
+                    "repeat",
+                    Some("Off → the queue → this song".to_string()),
+                    Some(icons.emoji(Icon::Repeat)),
+                ),
+            ]);
+        }
+    }
+    if !snap.following {
+        options.extend([
+            cards::option(
+                "Back 15 seconds",
+                "back15",
+                None,
+                Some(icons.emoji(Icon::Back15)),
+            ),
+            cards::option(
+                "Forward 15 seconds",
+                "fwd15",
+                None,
+                Some(icons.emoji(Icon::Fwd15)),
+            ),
+            cards::option(
+                "Jump to a time…",
+                "seek",
+                Some("Like 1:23, or +30 from here".to_string()),
+                Some(icons.emoji(Icon::Search)),
+            ),
+            cards::option(
+                "Restart this song",
+                "restart",
+                None,
+                Some(icons.emoji(Icon::Prev)),
+            ),
+            cards::option(
+                "Start radio from this song",
+                "radio",
+                Some("Replaces what's coming up".to_string()),
+                Some(icons.emoji(Icon::Radio)),
+            ),
+        ]);
+    }
+    for filter in Filter::ALL {
+        // Speed filters would drift away from your Spotify in follow mode.
+        if snap.following && filter.speed() != 1.0 {
+            continue;
+        }
+        let current = if filter == snap.filter { " (on)" } else { "" };
+        options.push(cards::option(
+            format!("Sound: {}{current}", filter.label()),
+            format!("filter:{}", filter.key()),
+            Some(filter.description().to_string()),
+            Some(icons.emoji(Icon::Filters)),
+        ));
+    }
+    let mine_on = matches!(snap.filter, Filter::Mine(_));
+    options.extend([
+        cards::option(
+            format!("Sound: My sound{}", if mine_on { " (on)" } else { "" }),
+            "filter:mine",
+            Some("Your own EQ".to_string()),
+            Some(icons.emoji(Icon::Filters)),
+        ),
+        cards::option(
+            "Change My sound…",
+            "eq",
+            Some("Bass, mids and treble, each up or down".to_string()),
+            Some(icons.emoji(Icon::Settings)),
+        ),
     ]);
-    cards::card(Some(accent), parts)
+    options.push(cards::option(
+        "Move this panel to the bottom",
+        "repost",
+        Some("Handy after a busy chat".to_string()),
+        Some(icons.emoji(Icon::Music)),
+    ));
+    let placeholder = match snap.filter {
+        Filter::Off => "More: sound, jump, radio…".to_string(),
+        filter => format!("Sound: {} · more…", filter.label()),
+    };
+    cards::select(
+        "loski:more",
+        &placeholder,
+        snap.status == Status::Idle,
+        options,
+    )
 }
 
 /// The queue, ten songs a page. `selected` is a 1-based queue position whose
@@ -851,25 +1039,58 @@ pub fn history_card(
     accent: u32,
     entries: &[HistoryEntry],
     selected: Option<&str>,
+    search: Option<(&str, usize)>,
 ) -> Component {
-    let mut lines = vec![format!("{} **Recently played**", icons.md(Icon::History))];
+    let heading = match search {
+        Some((about, total)) => format!(
+            "{} **History** · {about}\n-# {} match, newest first",
+            icons.md(Icon::History),
+            if total == 1 {
+                "1 play".to_string()
+            } else {
+                format!("{total} plays")
+            }
+        ),
+        None => format!("{} **Recently played**", icons.md(Icon::History)),
+    };
     if entries.is_empty() {
-        lines.push(
-            "Nothing yet. Songs show up here once they've played for 30 seconds.".to_string(),
+        let empty = if search.is_some() {
+            "Nothing matches. Try fewer words, or a longer stretch of time."
+        } else {
+            "Nothing yet. Songs show up here once they've played for 30 seconds."
+        };
+        return cards::card(
+            Some(accent),
+            vec![cards::text(format!("{heading}\n{empty}"))],
         );
     }
-    for entry in entries {
-        lines.push(format!(
-            "<t:{}:R> · [{}](https://open.spotify.com/track/{}) · {}",
-            entry.played_at,
-            escape_md(&truncate(&entry.title, 50)),
+
+    // The newest few with their covers, like the panel's up next; the
+    // rest as plain lines so the card stays short.
+    let mut components = vec![cards::text(heading)];
+    let (recent, older) = entries.split_at(entries.len().min(HISTORY_COVERS));
+    for entry in recent {
+        let line = format!(
+            "**[{}](https://open.spotify.com/track/{})**\n-# {} · <t:{}:R>",
+            escape_md(&truncate(&entry.title, 60)),
             entry.track_id(),
-            escape_md(&truncate(&entry.artists, 32))
-        ));
+            escape_md(&truncate(&entry.artists, 48)),
+            entry.played_at
+        );
+        components.push(cards::text_with_cover(line, entry.cover.as_deref()));
     }
-    let mut components = cards::text_blocks(lines);
-    if entries.is_empty() {
-        return cards::card(Some(accent), components);
+    if !older.is_empty() {
+        let lines = older.iter().map(|entry| {
+            format!(
+                "-# <t:{}:R> · [{}](https://open.spotify.com/track/{}) · {}",
+                entry.played_at,
+                escape_md(&truncate(&entry.title, 50)),
+                entry.track_id(),
+                escape_md(&truncate(&entry.artists, 32))
+            )
+        });
+        components.push(cards::gap());
+        components.extend(cards::text_blocks(lines));
     }
 
     // Each song once in the menu, even if you played it a few times.

@@ -11,7 +11,7 @@ use super::{
     cards::{self, color},
     icons::{Icon, Icons},
     interact::Ix,
-    voice,
+    updates, voice,
 };
 use crate::{
     engine::{Health, Status},
@@ -37,6 +37,8 @@ pub struct Report {
     pub memory_mb: Option<u64>,
     pub timezone: String,
     pub device_name: String,
+    /// A newer Loski release, if GitHub has one.
+    pub newer: Option<String>,
 }
 
 pub enum Spotify {
@@ -119,8 +121,9 @@ async fn gather(app: &App) -> Report {
         health: core.map(|c| c.engine.health()),
         uptime: app.started.elapsed(),
         memory_mb: memory_mb(),
-        timezone: app.cfg.timezone.name().to_string(),
+        timezone: app.timezone().name().to_string(),
         device_name: app.cfg.bot_name.clone(),
+        newer: updates::newer_release(app).map(|r| r.version().to_string()),
     }
 }
 
@@ -299,7 +302,12 @@ pub fn status_card(icons: &Icons, report: &Report) -> Component {
     if let Some(mb) = report.memory_mb {
         system.push_str(&format!(" · {mb} MB memory"));
     }
-    system.push_str(&format!(" · Loski {}", env!("CARGO_PKG_VERSION")));
+    system.push_str(&format!(" · Loski {}", updates::RUNNING));
+    if let Some(version) = &report.newer {
+        system.push_str(&format!(
+            "\n{MEH} Loski {version} is out. `.\\loski update` brings it in."
+        ));
+    }
 
     let headline = if healthy {
         "All good."

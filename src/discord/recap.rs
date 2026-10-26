@@ -31,11 +31,27 @@ pub struct Recap {
     pub artist: Option<String>,
     /// Each song once, in the order they first played.
     pub songs: Vec<Arc<TrackInfo>>,
+    /// Friends you listened with and for how long (ms), longest first.
+    pub with: Vec<(String, u64)>,
+    /// Songs liked this session and by whom, most liked first.
+    pub liked: Vec<(Arc<TrackInfo>, Vec<String>)>,
 }
 
 impl Recap {
-    pub fn from_plays(plays: &[Played]) -> Option<Self> {
+    /// Sums up `plays`; `name` turns a friend's user id into their name.
+    pub fn from_plays(plays: &[Played], name: impl Fn(u64) -> String) -> Option<Self> {
         let first = plays.first()?;
+        let mut together: HashMap<u64, u64> = HashMap::new();
+        for play in plays {
+            for friend in &play.with {
+                *together.entry(*friend).or_default() += play.listened_ms;
+            }
+        }
+        let mut with: Vec<(String, u64)> = together
+            .into_iter()
+            .map(|(id, ms)| (name(id), ms))
+            .collect();
+        with.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let mut counts: HashMap<_, (usize, u64)> = HashMap::new();
         let mut songs: Vec<Arc<TrackInfo>> = Vec::new();
         let mut artists: HashMap<&str, usize> = HashMap::new();
@@ -69,6 +85,8 @@ impl Recap {
             favourite,
             artist,
             songs,
+            with,
+            liked: Vec::new(),
         })
     }
 }
@@ -103,6 +121,47 @@ pub fn recap_card(icons: &Icons, accent: u32, recap: &Recap, farewell: Option<&s
             escape_md(&truncate(&track.artists_joined(), 40))
         )));
     }
+    if !recap.with.is_empty() {
+        let people: Vec<String> = recap
+            .with
+            .iter()
+            .take(4)
+            .map(|(name, ms)| {
+                format!(
+                    "**{}** {}",
+                    escape_md(&truncate(name, 32)),
+                    fmt_duration_words(*ms)
+                )
+            })
+            .collect();
+        let more = recap.with.len().saturating_sub(4);
+        let more = if more > 0 {
+            format!(" · and {more} more")
+        } else {
+            String::new()
+        };
+        parts.push(cards::text(format!(
+            "-# LISTENING WITH\n{}{more}",
+            people.join(" · ")
+        )));
+    }
+    if !recap.liked.is_empty() {
+        let lines: Vec<String> = recap
+            .liked
+            .iter()
+            .take(3)
+            .map(|(track, by)| {
+                format!(
+                    "{} [**{}**]({}) · {}",
+                    icons.md(Icon::Liked),
+                    escape_md(&truncate(&track.title, 50)),
+                    track.url(),
+                    super::friends::names_list(by, 3)
+                )
+            })
+            .collect();
+        parts.push(cards::text(format!("-# MOST LIKED\n{}", lines.join("\n"))));
+    }
     if let Some(text) = farewell {
         parts.push(cards::text(format!("-# {text}")));
     }
@@ -120,10 +179,36 @@ pub fn recap_card(icons: &Icons, accent: u32, recap: &Recap, farewell: Option<&s
 
 /// Turns the panel into the recap. Returns false when there's nothing to
 /// sum up (nothing played long enough to count).
-pub async fn show(app: &App, plays: &[Played], farewell: Option<&str>) -> bool {
-    let (Some(recap), Some(home)) = (Recap::from_plays(plays), app.ui.home()) else {
+pub async fn show(
+    app: &App,
+    plays: &[Played],
+    mut liked: Vec<(Arc<TrackInfo>, Vec<String>)>,
+    farewell: Option<&str>,
+) -> bool {
+    let name = |id| {
+        app.room
+            .name_of(id)
+            .unwrap_or_else(|| "a friend".to_string())
+    };
+    let (Some(mut recap), Some(home)) = (Recap::from_plays(plays, name), app.ui.home()) else {
         return false;
     };
+    // A song liked twice in one night counts once, with everyone who liked it.
+    let mut merged: Vec<(Arc<TrackInfo>, Vec<String>)> = Vec::new();
+    for (track, by) in liked.drain(..) {
+        match merged.iter_mut().find(|(t, _)| t.id == track.id) {
+            Some((_, names)) => {
+                for name in by {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            None => merged.push((track, by)),
+        }
+    }
+    merged.sort_by_key(|(_, by)| std::cmp::Reverse(by.len()));
+    recap.liked = merged;
     let components = [recap_card(&app.icons, app.ui.color(), &recap, farewell)];
 
     let mut posted = None;
@@ -166,7 +251,7 @@ fn session_name(app: &App, started_at: i64) -> String {
     let Some(at) = Utc.timestamp_opt(started_at, 0).single() else {
         return "Last session".to_string();
     };
-    let at = at.with_timezone(&app.cfg.timezone);
+    let at = at.with_timezone(&app.timezone());
     let part = match at.hour() {
         5..=11 => "morning",
         12..=16 => "afternoon",
@@ -240,9 +325,11 @@ mod tests {
                 explicit: false,
                 year: None,
                 from: None,
+                requested_by: None,
             }),
             started_at: 1_760_000_000 + n as i64,
             listened_ms: 180_000,
+            with: if n == 1 { vec![7] } else { Vec::new() },
         }
     }
 
@@ -255,8 +342,10 @@ mod tests {
             play(3, "Breaking Benjamin"),
             play(1, "Breaking Benjamin"),
         ];
-        let recap = Recap::from_plays(&plays).unwrap();
+        let recap = Recap::from_plays(&plays, |id| format!("Friend {id}")).unwrap();
         assert_eq!(recap.plays, 5);
+        // Friend 7 was there for the three plays of Song 1.
+        assert_eq!(recap.with, [("Friend 7".to_string(), 3 * 180_000)]);
         assert_eq!(recap.listened_ms, 5 * 180_000);
         assert_eq!(recap.started_at, 1_760_000_001);
         let (favourite, times) = recap.favourite.unwrap();
@@ -269,9 +358,9 @@ mod tests {
     #[test]
     fn a_mixed_session_names_no_favourites() {
         let plays = [play(1, "A"), play(2, "B"), play(3, "C"), play(4, "D")];
-        let recap = Recap::from_plays(&plays).unwrap();
+        let recap = Recap::from_plays(&plays, |_| String::new()).unwrap();
         assert!(recap.favourite.is_none());
         assert!(recap.artist.is_none());
-        assert!(Recap::from_plays(&[]).is_none());
+        assert!(Recap::from_plays(&[], |_| String::new()).is_none());
     }
 }

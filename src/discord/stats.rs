@@ -1,9 +1,10 @@
-//! /stats, its tabs and "play your top songs", and the monthly recap DM.
+//! /stats, its tabs (Together included) and "play your top songs", the
+//! monthly recap DM, and Loski Wrapped: /wrapped, and a DM on January 1st.
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use chrono_tz::Tz;
 use futures::future::join_all;
 use librespot_core::{SpotifyId, SpotifyUri};
@@ -22,8 +23,9 @@ use super::{
     oops,
 };
 use crate::{
-    picture::{self, StatsPicture},
-    stats::{self, Bar, Range, Stats},
+    genres,
+    picture::{self, StatsPicture, Tile, WrappedPicture},
+    stats::{self, Bar, Range, Stats, Together},
     util::{escape_md, fmt_duration_words, truncate},
 };
 
@@ -32,6 +34,10 @@ const SHOWN: usize = 5;
 const PLAY_TOP: usize = 50;
 /// Remembers which month the last recap covered.
 const RECAP_MARKER: &str = "recap_sent";
+/// Remembers which year the last Wrapped covered.
+const WRAPPED_MARKER: &str = "wrapped_sent";
+/// Friends listed on the Together tab.
+const FRIENDS_SHOWN: usize = 6;
 
 #[derive(CommandOption, CreateOption)]
 pub enum StatsRange {
@@ -53,16 +59,41 @@ pub struct StatsCmd {
     range: Option<StatsRange>,
 }
 
-fn now(app: &App) -> DateTime<Tz> {
-    Utc::now().with_timezone(&app.cfg.timezone)
+#[derive(CommandModel, CreateCommand)]
+#[command(
+    name = "wrapped",
+    desc = "Loski Wrapped: your year in music, in pictures"
+)]
+pub struct WrappedCmd {
+    /// Which year (this one so far if you leave it out)
+    #[command(min_value = 2020, max_value = 2100)]
+    year: Option<i64>,
 }
 
-async fn compute(app: &App, range: Range) -> Stats {
+pub(super) fn now(app: &App) -> DateTime<Tz> {
+    Utc::now().with_timezone(&app.timezone())
+}
+
+pub(super) async fn compute(app: &App, range: Range) -> Stats {
     let store = app.store.clone();
     let now = now(app);
-    tokio::task::spawn_blocking(move || stats::compute(&store.all_history(), range, now))
-        .await
-        .expect("stats task")
+    let known = app.genres.known();
+    let stats = tokio::task::spawn_blocking(move || {
+        stats::compute(&store.all_history(), range, now, &known)
+    })
+    .await
+    .expect("stats task");
+    // The genres of the artists that matter here are looked up for next time.
+    app.genres
+        .want(stats.top_artists.iter().take(25).map(|a| a.name.as_str()));
+    stats
+}
+
+/// A friend's name, as Loski last saw it.
+fn friend_name(app: &App, id: u64) -> String {
+    app.room
+        .name_of(id)
+        .unwrap_or_else(|| "a friend".to_string())
 }
 
 pub async fn stats(ix: &Ix, cmd: StatsCmd) -> Result<()> {
@@ -86,6 +117,19 @@ pub async fn show(ix: &Ix, range: Range, secs: u64) -> Result<()> {
 /// A tab on the stats card was clicked.
 pub async fn switch_tab(ix: &Ix, key: &str) -> Result<()> {
     ix.ack().await?;
+    if key == "together" {
+        let app = &ix.app;
+        let stats = compute(app, Range::AllTime).await;
+        let card = together_card(&app.icons, &stats.together, |id| friend_name(app, id));
+        app.http
+            .interaction(app.app_id)
+            .update_response(&ix.token)
+            .flags(cards::V2)
+            .keep_attachment_ids(&[])
+            .components(Some(&[card]))
+            .await?;
+        return Ok(());
+    }
     respond(ix, Range::from_key(key).unwrap_or(Range::Month)).await
 }
 
@@ -133,6 +177,7 @@ fn compared_short(stats: &Stats) -> Option<String> {
     let then = match stats.range {
         Range::Week => "last week".to_string(),
         Range::WholeMonth { .. } => first.format("%B").to_string(),
+        Range::Year(_) => first.format("%Y").to_string(),
         _ => days_span(first, last),
     };
     let diff = stats.listened_ms as i64 - before as i64;
@@ -169,14 +214,17 @@ async fn picture(app: &App, stats: &Stats) -> Option<Vec<u8>> {
 
     let mut chips = Vec::new();
     match stats.range {
-        Range::WholeMonth { .. } if stats.best_streak > 1 => {
+        Range::WholeMonth { .. } | Range::Year(_) if stats.best_streak > 1 => {
             chips.push(format!("{}-day best streak", stats.best_streak));
         }
-        Range::WholeMonth { .. } => {}
+        Range::WholeMonth { .. } | Range::Year(_) => {}
         _ if stats.streak > 1 => chips.push(format!("{}-day streak", stats.streak)),
         _ => {}
     }
     chips.extend(compared_short(stats));
+    if let Some((genre, _)) = stats.top_genres.first() {
+        chips.push(format!("Mostly {genre}"));
+    }
     let best = stats
         .bars
         .iter()
@@ -271,7 +319,7 @@ fn alt_text(stats: &Stats) -> String {
 pub async fn play_top(ix: &Ix, key: &str) -> Result<()> {
     let app = &ix.app;
     let core = app.core()?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     let range = Range::from_key(key).unwrap_or(Range::Month);
     ix.ack().await?;
     let stats = compute(app, range).await;
@@ -294,7 +342,7 @@ pub async fn play_top(ix: &Ix, key: &str) -> Result<()> {
     let card = commands::enqueue(
         app,
         &core,
-        guild,
+        target,
         resolved.tracks,
         Placement::End,
         resolved.source,
@@ -338,6 +386,7 @@ fn kicker(stats: &Stats) -> String {
         }
         Range::AllTime => "ALL TIME".to_string(),
         Range::WholeMonth { year, .. } => format!("{month} {year}"),
+        Range::Year(year) => format!("YOUR {year} IN MUSIC"),
     }
     .to_uppercase()
 }
@@ -351,6 +400,7 @@ fn compared(stats: &Stats) -> Option<String> {
     let then = match stats.range {
         Range::Week => "the week before".to_string(),
         Range::WholeMonth { .. } => first.format("%B").to_string(),
+        Range::Year(_) => first.format("%Y").to_string(),
         _ => days_span(first, last),
     };
     let diff = stats.listened_ms as i64 - before as i64;
@@ -417,11 +467,58 @@ fn peak_line(hour: u32) -> String {
     format!("{}: you listen most around {hour:02}:00.", listener(hour))
 }
 
+/// The tabs under the stats and Together cards, `active` highlighted, and
+/// "Play top songs" for a stats tab (disabled when there's nothing).
+fn tabs(icons: &Icons, active: &str, play: Option<bool>) -> Component {
+    let mut buttons: Vec<Component> = Range::TABS
+        .iter()
+        .map(|range| (range.key(), range.label()))
+        .chain([("together", "Together")])
+        .map(|(key, label)| {
+            let style = if key == active {
+                ButtonStyle::Primary
+            } else {
+                ButtonStyle::Secondary
+            };
+            Btn::label(&format!("loski:stats:{key}"), label)
+                .style(style)
+                .build(icons)
+        })
+        .collect();
+    if let Some(enabled) = play {
+        buttons.push(
+            Btn::icon(&format!("loski:stats:play:{active}"), Icon::Play)
+                .with_label("Play top songs")
+                .disabled(!enabled)
+                .build(icons),
+        );
+    }
+    cards::row(buttons)
+}
+
+/// "-# TOP GENRES" and the first few, or None while none are known.
+fn genres_text(stats: &Stats) -> Option<String> {
+    if stats.top_genres.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = stats
+        .top_genres
+        .iter()
+        .take(4)
+        .map(|(genre, _)| genres::display(genre))
+        .collect();
+    Some(format!("-# TOP GENRES\n{}", names.join(" · ")))
+}
+
 /// The stats card: the picture (or, without one, the same numbers as text)
 /// and tabs for the other ranges. `picture` is the uploaded picture's address.
 pub fn stats_card(icons: &Icons, stats: &Stats, picture: Option<&str>) -> Component {
     let mut parts = match picture {
-        Some(url) if stats.plays > 0 => vec![cards::image(url, &alt_text(stats))],
+        Some(url) if stats.plays > 0 => {
+            let mut parts = vec![cards::image(url, &alt_text(stats))];
+            parts.extend(genres_text(stats).map(cards::text));
+            parts
+        }
         _ => {
             let mut parts = vec![summary(icons, stats)];
             if stats.plays > 0 {
@@ -430,31 +527,58 @@ pub fn stats_card(icons: &Icons, stats: &Stats, picture: Option<&str>) -> Compon
             parts
         }
     };
-
-    let mut tabs: Vec<Component> = Range::TABS
-        .iter()
-        .map(|&range| {
-            let style = if range == stats.range {
-                ButtonStyle::Primary
-            } else {
-                ButtonStyle::Secondary
-            };
-            Btn::label(&format!("loski:stats:{}", range.key()), range.label())
-                .style(style)
-                .build(icons)
-        })
-        .collect();
-    tabs.push(
-        Btn::icon(
-            &format!("loski:stats:play:{}", stats.range.key()),
-            Icon::Play,
-        )
-        .with_label("Play top songs")
-        .disabled(stats.plays == 0)
-        .build(icons),
-    );
     parts.push(cards::divider());
-    parts.push(cards::row(tabs));
+    parts.push(tabs(icons, stats.range.key(), Some(stats.plays > 0)));
+    cards::card(Some(color::BRAND), parts)
+}
+
+/// The Together tab: time and songs with each friend who was in the call.
+pub fn together_card(
+    icons: &Icons,
+    together: &[Together],
+    name: impl Fn(u64) -> String,
+) -> Component {
+    let mut parts = vec![cards::text(format!(
+        "{} **Listening together**\n-# ALL TIME",
+        icons.md(Icon::Friends)
+    ))];
+    if together.is_empty() {
+        parts.push(cards::text(
+            "Nobody's listened along yet. Friends in the call while your music plays show up here.",
+        ));
+    }
+    for friend in together.iter().take(FRIENDS_SHOWN) {
+        let songs: Vec<String> = friend
+            .top_songs
+            .iter()
+            .map(|s| {
+                format!(
+                    "[{}](https://open.spotify.com/track/{})",
+                    escape_md(&truncate(&s.title, 40)),
+                    s.track_id()
+                )
+            })
+            .collect();
+        let mut text = format!(
+            "**{}** · {} · {}",
+            escape_md(&truncate(&name(friend.friend), 40)),
+            fmt_duration_words(friend.listened_ms),
+            plural(friend.plays, "song", "songs")
+        );
+        if !songs.is_empty() {
+            text.push_str(&format!("\n-# Most played together: {}", songs.join(" · ")));
+        }
+        let cover = friend.top_songs.first().and_then(|s| s.cover.as_deref());
+        parts.push(cards::text_with_cover(text, cover));
+    }
+    if together.len() > FRIENDS_SHOWN {
+        parts.push(cards::text(format!(
+            "-# and {} more",
+            plural((together.len() - FRIENDS_SHOWN) as u64, "friend", "friends")
+        )));
+    }
+    parts.push(cards::divider());
+    parts.push(tabs(icons, "together", None));
     cards::card(Some(color::BRAND), parts)
 }
 
@@ -482,6 +606,264 @@ pub fn recap_card(icons: &Icons, stats: &Stats, picture: Option<&str>) -> Compon
     cards::card(Some(color::BRAND), parts)
 }
 
+/// "41,230".
+pub(super) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// The tiles of Wrapped's highlights picture, from the year's numbers.
+fn wrapped_tiles(stats: &Stats, name: impl Fn(u64) -> String) -> Vec<Tile> {
+    let tile = |label: &str, value: String, detail: String| Tile {
+        label: label.to_string(),
+        value,
+        detail,
+    };
+    let mut tiles = Vec::new();
+    if let Some(song) = stats.top_songs.first() {
+        tiles.push(tile(
+            "TOP SONG",
+            song.title.clone(),
+            format!("{} · {}", song.artists, plural(song.plays, "play", "plays")),
+        ));
+    }
+    if let Some(artist) = stats.top_artists.first() {
+        tiles.push(tile(
+            "TOP ARTIST",
+            artist.name.clone(),
+            format!(
+                "{} · {}",
+                plural(artist.plays, "play", "plays"),
+                fmt_duration_words(artist.listened_ms)
+            ),
+        ));
+    }
+    if let Some((day, ms)) = stats.best_day {
+        tiles.push(tile(
+            "BIGGEST DAY",
+            day.format("%A, %B %-d").to_string(),
+            fmt_duration_words(ms),
+        ));
+    }
+    if stats.best_streak > 1 {
+        tiles.push(tile(
+            "LONGEST STREAK",
+            format!("{} days", stats.best_streak),
+            "in a row with music".to_string(),
+        ));
+    }
+    if let Some(friend) = stats.together.first() {
+        tiles.push(tile(
+            "LISTENED WITH MOST",
+            name(friend.friend),
+            format!("{} together", fmt_duration_words(friend.listened_ms)),
+        ));
+    }
+    if let Some((genre, _)) = stats.top_genres.first() {
+        let more: Vec<&str> = stats
+            .top_genres
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|(g, _)| g.as_str())
+            .collect();
+        let detail = match more.as_slice() {
+            [] => "your sound this year".to_string(),
+            [one] => format!("then {one}"),
+            [one, two, ..] => format!("then {one} and {two}"),
+        };
+        tiles.push(tile("TOP GENRE", genres::display(genre), detail));
+    }
+    // Fill the grid when friends or genres are missing.
+    let busiest = stats
+        .bars
+        .iter()
+        .filter(|b| b.listened_ms > 0)
+        .max_by_key(|b| b.listened_ms);
+    if tiles.len() < 6
+        && let Some(month) = busiest
+    {
+        tiles.push(tile(
+            "BIGGEST MONTH",
+            month.first_day.format("%B").to_string(),
+            fmt_duration_words(month.listened_ms),
+        ));
+    }
+    if tiles.len() < 6 && stats.artists > 0 {
+        tiles.push(tile(
+            "DISCOVERED",
+            plural(stats.artists as u64, "artist", "artists"),
+            format!("across {}", plural(stats.songs as u64, "song", "songs")),
+        ));
+    }
+    tiles.truncate(6);
+    tiles
+}
+
+/// Draws Wrapped's highlights picture.
+async fn wrapped_picture(app: &App, stats: &Stats, year: i32) -> Option<Vec<u8>> {
+    let cover = fetch_cover(
+        &app.web,
+        stats.top_songs.first().and_then(|s| s.cover.clone()),
+    )
+    .await;
+    let picture = WrappedPicture {
+        kicker: format!("LOSKI WRAPPED · {year}"),
+        headline: format!("{} minutes", thousands(stats.listened_ms / 60_000)),
+        subline: format!(
+            "of music · {} · {} · {}",
+            plural(stats.plays, "play", "plays"),
+            plural(stats.songs as u64, "song", "songs"),
+            plural(stats.artists as u64, "artist", "artists"),
+        ),
+        tiles: wrapped_tiles(stats, |id| friend_name(app, id)),
+        cover,
+    };
+    tokio::task::spawn_blocking(move || picture::render_wrapped(&picture))
+        .await
+        .ok()
+}
+
+/// Loski Wrapped as a card: the highlights and the year's stats picture,
+/// or the same in words without them. `pictures` are the uploaded files'
+/// addresses (highlights, then the year).
+pub fn wrapped_card(
+    icons: &Icons,
+    stats: &Stats,
+    year: i32,
+    so_far: bool,
+    pictures: &[&str],
+    name: impl Fn(u64) -> String,
+) -> Component {
+    let mut parts = vec![cards::text(format!(
+        "{} **Loski Wrapped {year}**\nYour year in music{}.",
+        icons.md(Icon::Stats),
+        if so_far {
+            " so far"
+        } else {
+            ", start to finish"
+        }
+    ))];
+    if pictures.is_empty() {
+        let mut lines = vec![format!(
+            "## {} minutes\n{} · {} · {}",
+            thousands(stats.listened_ms / 60_000),
+            plural(stats.plays, "play", "plays"),
+            plural(stats.songs as u64, "song", "songs"),
+            plural(stats.artists as u64, "artist", "artists"),
+        )];
+        for tile in wrapped_tiles(stats, name) {
+            lines.push(format!(
+                "-# {}\n**{}** · {}",
+                tile.label,
+                escape_md(&truncate(&tile.value, 80)),
+                escape_md(&truncate(&tile.detail, 80))
+            ));
+        }
+        parts.push(cards::text(lines.join("\n")));
+    } else {
+        let alt = alt_text(stats);
+        let items: Vec<(&str, &str)> = pictures.iter().map(|url| (*url, alt.as_str())).collect();
+        parts.push(cards::gallery(&items));
+    }
+    parts.push(cards::text(
+        "-# `/wrapped year:` shows another year. `/stats` has this week and month.",
+    ));
+    cards::card(Some(color::BRAND), parts)
+}
+
+/// Wrapped for `year`, ready to send: the card and its pictures. None when
+/// nothing played that year.
+async fn wrapped_message(app: &App, year: i32) -> Option<(Component, Vec<Attachment>)> {
+    let stats = compute(app, Range::Year(year)).await;
+    if stats.plays == 0 {
+        return None;
+    }
+    let (highlights, year_picture) =
+        futures::join!(wrapped_picture(app, &stats, year), picture(app, &stats));
+    let mut files = Vec::new();
+    let mut urls = Vec::new();
+    for (bytes, name) in [
+        (highlights, picture::WRAPPED_FILENAME),
+        (year_picture, picture::FILENAME),
+    ] {
+        if let Some(bytes) = bytes {
+            files.push(Attachment::from_bytes(
+                name.to_string(),
+                bytes,
+                files.len() as u64 + 1,
+            ));
+            urls.push(format!("attachment://{name}"));
+        }
+    }
+    let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let so_far = year >= now(app).year();
+    let card = wrapped_card(&app.icons, &stats, year, so_far, &urls, |id| {
+        friend_name(app, id)
+    });
+    Some((card, files))
+}
+
+pub async fn wrapped(ix: &Ix, cmd: WrappedCmd) -> Result<()> {
+    let app = &ix.app;
+    // Drawing two pictures takes a moment.
+    ix.defer().await?;
+    let year = cmd.year.map_or_else(|| now(app).year(), |y| y as i32);
+    let Some((card, files)) = wrapped_message(app, year).await else {
+        return Err(oops(format!("Nothing played in {year} yet.")));
+    };
+    app.http
+        .interaction(app.app_id)
+        .update_response(&ix.token)
+        .flags(cards::V2)
+        .attachments(&files)
+        .components(Some(&[card]))
+        .await?;
+    ix.delete_later(LONG_SECS * 3);
+    Ok(())
+}
+
+/// On January 1st (or the first time Loski runs after it), Wrapped for the
+/// year that just ended arrives in your DMs.
+async fn send_wrapped_if_due(app: &App) {
+    let last = app.store.read_marker(WRAPPED_MARKER);
+    let Some(year) = stats::wrapped_due(now(app), last.as_deref()) else {
+        return;
+    };
+    if let Some((card, files)) = wrapped_message(app, year).await {
+        if !dm_with_files(app, card, &files).await {
+            // Try again next hour.
+            return;
+        }
+        tracing::info!("Sent Loski Wrapped for {year}");
+    }
+    app.store.write_marker(WRAPPED_MARKER, &year.to_string());
+}
+
+/// A card with pictures in your DMs. Returns whether it arrived.
+async fn dm_with_files(app: &App, card: Component, files: &[Attachment]) -> bool {
+    let Ok(dm) = app.http.create_private_channel(app.owner_id()).await else {
+        return false;
+    };
+    let Ok(dm) = dm.model().await else {
+        return false;
+    };
+    app.http
+        .create_message(dm.id)
+        .flags(cards::V2)
+        .attachments(files)
+        .components(&[card])
+        .await
+        .is_ok()
+}
+
 fn summary(icons: &Icons, stats: &Stats) -> Component {
     let title = match stats.range {
         Range::WholeMonth { .. } => format!(
@@ -489,6 +871,7 @@ fn summary(icons: &Icons, stats: &Stats) -> Component {
             icons.md(Icon::Stats),
             stats.first_day.format("%B")
         ),
+        Range::Year(year) => format!("{} **Your {year} in music**", icons.md(Icon::Stats)),
         _ => format!("{} **Your listening**", icons.md(Icon::Stats)),
     };
     if stats.plays == 0 {
@@ -505,10 +888,10 @@ fn summary(icons: &Icons, stats: &Stats) -> Component {
 
     let mut facts = Vec::new();
     match stats.range {
-        Range::WholeMonth { .. } if stats.best_streak > 1 => {
+        Range::WholeMonth { .. } | Range::Year(_) if stats.best_streak > 1 => {
             facts.push(format!("🔥 {}-day streak at best", stats.best_streak));
         }
-        Range::WholeMonth { .. } => {}
+        Range::WholeMonth { .. } | Range::Year(_) => {}
         _ if stats.streak > 1 => {
             let mut streak = format!("🔥 {}-day streak", stats.streak);
             if stats.best_streak > stats.streak {
@@ -575,17 +958,22 @@ fn details(stats: &Stats) -> Vec<Component> {
         cards::text(format!("-# TOP SONGS\n{}", songs.join("\n"))),
         cards::text(format!("-# TOP ARTISTS\n{}", artists.join("\n"))),
     ];
+    parts.extend(genres_text(stats).map(cards::text));
     if let Some(hour) = stats.peak_hour {
         parts.push(cards::text(format!("-# {}", peak_line(hour))));
     }
     parts
 }
 
-/// Checks every hour whether a month has ended, and DMs you its recap.
-/// If Loski was off on the 1st, the recap arrives the next time it runs.
+/// Checks every hour whether a month (or a year) has ended, and DMs you its
+/// recap (or Wrapped). If Loski was off on the 1st, it arrives the next time
+/// it runs.
 pub async fn recap_loop(app: Arc<App>) {
     loop {
         send_recap_if_due(&app).await;
+        send_wrapped_if_due(&app).await;
+        // Keeps the genres of this year's artists looked up ahead of Wrapped.
+        compute(&app, Range::Year(now(&app).year())).await;
         tokio::time::sleep(Duration::from_secs(3600)).await;
     }
 }
@@ -652,5 +1040,8 @@ mod tests {
         assert_eq!(short_duration(2_700_000), "45m");
         assert_eq!(short_duration(40_000), "40s");
         assert_eq!(peak_line(7), "Early bird: you listen most around 07:00.");
+        assert_eq!(thousands(41_230), "41,230");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000_000), "1,000,000");
     }
 }

@@ -1,7 +1,8 @@
 # Runs on every push: formatting, lint and tests, then the Docker image for
 # 64-bit Intel/AMD and 64-bit ARM, each built natively on its own runner.
 # Pushes to main (and version tags like v1.2.0) publish both under the same
-# tags on ghcr.io, which is what `loski update` downloads.
+# tags on ghcr.io, which is what `loski update` downloads. A version tag also
+# gets a GitHub release with its notes from CHANGELOG.md.
 name: Checks
 
 on:
@@ -164,3 +165,40 @@ jobs:
 
       - name: Check it
         run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
+
+  # A version tag also becomes a GitHub release, with that version's part of
+  # CHANGELOG.md as its notes. Running copies of Loski read the latest release
+  # for their "a new version is out" DM, so it waits until the images are up.
+  release:
+    name: GitHub release
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Everything under "## 2.0.0 (date)" up to the next version.
+          awk -v heading="## $version" '
+            index($0, heading " ") == 1 || $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag like v2.1.0-beta.1 is a pre-release, which nobody is told about.
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "Loski ${GITHUB_REF_NAME#v}" --notes-file notes.md "${flags[@]}"

@@ -1,4 +1,5 @@
-//! Joining voice, following you between channels, and leaving when you go.
+//! Joining voice, following you between channels, and leaving when you go,
+//! or staying put and keeping the music going with 24/7.
 
 use std::{
     sync::{
@@ -27,11 +28,14 @@ use twilight_model::{
     voice::VoiceState as DiscordVoiceState,
 };
 
-use super::{App, Core, SHORT_SECS, cards, oops, panel, recap};
+use super::{App, Core, SHORT_SECS, cards, friends, library, lyrics, oops, panel, recap};
 use crate::{
     audio::{CHANNELS, MixReader, SAMPLE_RATE},
     config::AudioBitrate,
+    engine::Status,
     personality,
+    track::TrackInfo,
+    util::truncate,
 };
 
 #[derive(Default)]
@@ -48,6 +52,12 @@ pub struct Voice {
     /// Woken when the voice connection drops or the audio stream dies.
     heal: Arc<Notify>,
     dropped: Arc<AtomicBool>,
+    /// Discord refused the channel status (a missing permission); don't keep asking.
+    status_denied: AtomicBool,
+    /// 24/7 paused the music because nobody was left to hear it.
+    room_paused: AtomicBool,
+    /// 24/7 is fetching a radio, so voice updates don't start a second one.
+    starting_radio: AtomicBool,
 }
 
 impl Voice {
@@ -81,9 +91,10 @@ pub fn user_channel(
     app.cache.voice_state(user, guild).map(|v| v.channel_id())
 }
 
-/// The best quality this server allows, unless AUDIO_BITRATE says otherwise.
+/// The best quality this server allows, unless /settings or AUDIO_BITRATE
+/// says otherwise.
 fn bitrate(app: &App, guild: Id<GuildMarker>) -> Bitrate {
-    match app.cfg.bitrate {
+    match app.bitrate() {
         AudioBitrate::Fixed(bits) => Bitrate::Bits(bits),
         AudioBitrate::Auto => {
             let tier = app
@@ -105,6 +116,16 @@ pub fn bitrate_kbps(app: &App, guild: Id<GuildMarker>) -> u32 {
     match bitrate(app, guild) {
         Bitrate::Bits(bits) => (bits / 1000) as u32,
         _ => 0,
+    }
+}
+
+/// The quality changed in /settings: the call picks it up straight away.
+pub async fn apply_bitrate(app: &App) {
+    let Some(guild) = app.voice.guild() else {
+        return;
+    };
+    if let Some(call) = app.songbird.get(guild) {
+        call.lock().await.set_bitrate(bitrate(app, guild));
     }
 }
 
@@ -173,7 +194,57 @@ pub async fn join(
     if connected && app.voice.channel() == Some(channel) && core.engine.output().is_some() {
         return Ok(());
     }
-    connect(app, core, guild, channel).await
+    // Following you to another channel: the old one stops showing the song.
+    let previous = app.voice.channel().filter(|c| *c != channel);
+    if let Some(previous) = previous {
+        set_status(app, previous, "").await;
+    }
+    connect(app, core, guild, channel).await?;
+    if previous.is_some() {
+        show_song(app, core.engine.current_track().as_deref()).await;
+    }
+    Ok(())
+}
+
+/// The song in the voice channel's status, the line under its name in the
+/// channel list, so people see what's on before they join. `None` clears it.
+pub async fn show_song(app: &App, track: Option<&TrackInfo>) {
+    let Some(channel) = app.voice.channel() else {
+        return;
+    };
+    let status = track
+        .map(|t| truncate(&format!("♪ {}", t.display()), 500))
+        .unwrap_or_default();
+    set_status(app, channel, &status).await;
+}
+
+async fn set_status(app: &App, channel: Id<ChannelMarker>, status: &str) {
+    if app.voice.status_denied.load(Ordering::Relaxed) {
+        return;
+    }
+    // twilight has no call for this yet, so it goes to Discord directly.
+    let sent = app
+        .web
+        .put(format!(
+            "https://discord.com/api/v10/channels/{channel}/voice-status"
+        ))
+        .header("Authorization", format!("Bot {}", app.cfg.discord_token))
+        .json(&serde_json::json!({ "status": status }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    match sent {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) if response.status() == reqwest::StatusCode::FORBIDDEN => {
+            if !app.voice.status_denied.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "Loski can't show the song in the voice channel's status. Give its role the \"Set Voice Channel Status\" permission to turn that on."
+                );
+            }
+        }
+        Ok(response) => tracing::debug!("voice channel status: Discord said {}", response.status()),
+        Err(e) => tracing::debug!("voice channel status: {e}"),
+    }
 }
 
 /// Joins (or rejoins) the channel and makes sure Loski's audio is playing into it.
@@ -221,10 +292,25 @@ async fn connect(
         core.engine.attach_output(handle);
     }
 
-    let mut st = app.voice.state.lock();
-    st.guild = Some(guild);
-    st.channel = Some(channel);
+    {
+        let mut st = app.voice.state.lock();
+        st.guild = Some(guild);
+        st.channel = Some(channel);
+    }
+    remember_channel(app);
+    friends::people_changed(app);
     Ok(())
+}
+
+/// 24/7 notes where Loski is, to come back there after a restart.
+fn remember_channel(app: &App) {
+    let (Some(guild), Some(channel)) = (app.voice.guild(), app.voice.channel()) else {
+        return;
+    };
+    let here = Some((guild.get(), channel.get()));
+    if app.always_on() && app.prefs().stay_in != here {
+        app.update_prefs(|p| p.stay_in = here);
+    }
 }
 
 /// Whether the voice connection and audio stream are as they should be.
@@ -294,9 +380,15 @@ pub async fn leave(app: &Arc<App>, farewell: Option<&str>) {
         {
             timer.abort();
         }
-        st.channel = None;
-        st.guild.take()
+        (st.guild.take(), st.channel.take())
     };
+    let (guild, channel) = guild;
+    app.voice.room_paused.store(false, Ordering::Relaxed);
+    // Cleared while Loski is still in the channel, which the status needs.
+    if let Some(channel) = channel {
+        set_status(app, channel, "").await;
+    }
+    lyrics::close(app).await;
     if let Some(core) = app.core.get() {
         core.engine.detach_output();
     }
@@ -304,13 +396,15 @@ pub async fn leave(app: &Arc<App>, farewell: Option<&str>) {
         let _ = app.songbird.remove(guild).await;
     }
     app.set_listening(None);
+    friends::people_changed(app);
     // The panel becomes the session's recap; with nothing to sum up it just goes.
     let played = app
         .core
         .get()
         .map(|core| core.engine.take_played())
         .unwrap_or_default();
-    if recap::show(app, &played, farewell).await {
+    let liked = friends::session_over(app);
+    if recap::show(app, &played, liked, farewell).await {
         return;
     }
     panel::delete(app).await;
@@ -318,6 +412,15 @@ pub async fn leave(app: &Arc<App>, farewell: Option<&str>) {
         app.announce(home, cards::info(&app.icons, text), SHORT_SECS)
             .await;
     }
+}
+
+/// Leaves until you call Loski back: `/stop`, the sleep timer, or someone
+/// disconnecting it. 24/7 doesn't bring it back until the next `/play`.
+pub async fn send_away(app: &Arc<App>, farewell: Option<&str>) {
+    if app.prefs().stay_in.is_some() {
+        app.update_prefs(|p| p.stay_in = None);
+    }
+    leave(app, farewell).await;
 }
 
 fn spawn_timer(
@@ -339,24 +442,130 @@ fn spawn_timer(
 }
 
 pub fn schedule_idle_leave(app: &Arc<App>) {
-    if app.voice.guild().is_none() {
+    if app.voice.guild().is_none() || app.always_on() {
         return;
     }
-    spawn_timer(app, app.cfg.idle_leave, personality::leaving_idle(), |st| {
+    spawn_timer(app, app.idle_leave(), personality::leaving_idle(), |st| {
         &mut st.idle_timer
     });
 }
 
 fn schedule_owner_gone_leave(app: &Arc<App>) {
-    if app.voice.state.lock().leave_timer.is_some() {
+    if app.voice.state.lock().leave_timer.is_some() || app.always_on() {
         return;
     }
-    spawn_timer(
-        app,
-        app.cfg.leave_after,
-        personality::leaving_alone(),
-        |st| &mut st.leave_timer,
-    );
+    spawn_timer(app, app.leave_after(), personality::leaving_alone(), |st| {
+        &mut st.leave_timer
+    });
+}
+
+/// The queue ran out: 24/7 keeps going with a radio, otherwise Loski
+/// leaves after a while.
+pub fn queue_ended(app: &Arc<App>) {
+    if !app.always_on() {
+        schedule_idle_leave(app);
+        return;
+    }
+    if let Some(core) = app.core.get() {
+        tokio::spawn(keep_going(app.clone(), core.clone()));
+    }
+}
+
+/// 24/7: with nothing playing and someone listening, a radio from the
+/// last song keeps the music going.
+async fn keep_going(app: Arc<App>, core: Arc<Core>) {
+    if !app.always_on() || friends::listeners(&app).is_empty() {
+        return;
+    }
+    let snap = core.engine.snapshot();
+    if snap.status != Status::Idle || snap.following || snap.connect {
+        return;
+    }
+    if app.voice.starting_radio.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let started = library::radio_to_keep_going(&core, &app.store).await;
+    app.voice.starting_radio.store(false, Ordering::Relaxed);
+    match started {
+        Ok(count) => tracing::info!("24/7: the queue ran out, so {count} songs from a radio"),
+        Err(e) => tracing::warn!("24/7 couldn't start a radio: {e:#}"),
+    }
+}
+
+/// 24/7: the music pauses while nobody's there to hear it (so it doesn't
+/// count in your stats), and carries on, or starts again, when someone joins.
+async fn check_room(app: &Arc<App>, core: &Arc<Core>) {
+    if app.voice.channel().is_none() {
+        return;
+    }
+    if friends::listeners(app).is_empty() {
+        if core.engine.pause() {
+            app.voice.room_paused.store(true, Ordering::Relaxed);
+            tracing::info!("24/7: nobody's listening, paused until someone joins");
+        }
+    } else if app.voice.room_paused.swap(false, Ordering::Relaxed) {
+        core.engine.resume();
+    } else {
+        keep_going(app.clone(), core.clone()).await;
+    }
+}
+
+/// 24/7 was switched on or off in /settings.
+pub async fn always_on_changed(app: &Arc<App>) {
+    let Some(core) = app.core.get().filter(|_| app.voice.guild().is_some()) else {
+        return;
+    };
+    if app.always_on() {
+        app.voice.cancel_leave();
+        app.voice.cancel_idle();
+        check_room(app, core).await;
+        return;
+    }
+    // Back to leaving by itself, the usual way.
+    if !friends::someone_in_charge(app) {
+        schedule_owner_gone_leave(app);
+    }
+    if core.engine.snapshot().status == Status::Idle {
+        schedule_idle_leave(app);
+    }
+}
+
+/// 24/7 after a restart: back to the channel Loski was in, and on with the
+/// music if anyone's there.
+pub async fn come_back(app: Arc<App>) {
+    let Some((guild, channel)) = app.prefs().stay_in.filter(|_| app.always_on()) else {
+        return;
+    };
+    let (Some(guild), Some(channel)) = (
+        Id::<GuildMarker>::new_checked(guild),
+        Id::<ChannelMarker>::new_checked(channel),
+    ) else {
+        return;
+    };
+    // The server (and who's in voice) arrives a moment after logging in.
+    for _ in 0..60 {
+        if app.cache.guild(guild).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // Discord tidies away a voice session left over from a crash first.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let Some(core) = app.core.get() else { return };
+    if app.voice.guild().is_some() {
+        return;
+    }
+    if app.ui.home().is_none() {
+        // The voice channel's own text chat.
+        app.ui.set_home(channel);
+    }
+    match join(&app, core, guild, channel).await {
+        Ok(()) => {
+            tracing::info!("24/7: back in voice after a restart");
+            check_room(&app, core).await;
+        }
+        Err(e) => tracing::warn!("24/7 couldn't get back into voice: {e:#}"),
+    }
 }
 
 pub async fn on_voice_state(app: &Arc<App>, state: &DiscordVoiceState) {
@@ -368,28 +577,33 @@ pub async fn on_voice_state(app: &Arc<App>, state: &DiscordVoiceState) {
     }
 
     if state.user_id == app.bot_id {
-        match state.channel_id {
+        let Some(channel) = state.channel_id else {
             // Someone disconnected us.
-            None => leave(app, None).await,
-            Some(channel) => app.voice.state.lock().channel = Some(channel),
-        }
-        return;
+            send_away(app, None).await;
+            return;
+        };
+        // Moved, by you or by someone else: a new room to check below.
+        app.voice.state.lock().channel = Some(channel);
+        remember_channel(app);
+    } else if state.user_id == app.owner_id()
+        && let Some(channel) = state.channel_id
+        && app.voice.channel() != Some(channel)
+        && let Some(core) = app.core.get()
+        && let Err(e) = join(app, core, our_guild, channel).await
+    {
+        tracing::warn!("couldn't follow you to the new channel: {e:#}");
     }
-
-    if state.user_id != app.owner_id() {
-        return;
-    }
-    match state.channel_id {
-        Some(channel) => {
-            app.voice.cancel_leave();
-            if app.voice.channel() != Some(channel)
-                && let Some(core) = app.core.get()
-                && let Err(e) = join(app, core, our_guild, channel).await
-            {
-                tracing::warn!("couldn't follow you to the new channel: {e:#}");
-            }
+    friends::people_changed(app);
+    if app.always_on() {
+        // 24/7 pauses for an empty room and carries on after.
+        if let Some(core) = app.core.get() {
+            check_room(app, core).await;
         }
-        None => schedule_owner_gone_leave(app),
+    } else if friends::someone_in_charge(app) {
+        app.voice.cancel_leave();
+    } else {
+        // Nobody left who runs things (you or a co-DJ): leave in a minute.
+        schedule_owner_gone_leave(app);
     }
 }
 

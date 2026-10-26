@@ -14,6 +14,8 @@
         .\loski logs files Open the folder with the saved daily logs
         .\loski status     Whether Loski is running, and its last log lines
         .\loski selftest   Check the Spotify connection from inside Loski
+        .\loski backup     Save your history, mixes, settings and logins to one file
+        .\loski restore F  Bring a backup back (on this or another computer)
 #>
 param(
     [Parameter(Position = 0)]
@@ -28,6 +30,7 @@ Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
 
 $Container = 'loski'
 $DockerDesktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+$SetupPage = 'http://127.0.0.1:5588/'
 
 function Write-Step([string]$Text) { Write-Host "> $Text" -ForegroundColor Yellow }
 function Write-Done([string]$Text) { Write-Host "  $Text" -ForegroundColor Green }
@@ -66,10 +69,24 @@ function Start-Docker {
     return $false
 }
 
+# Docker needs a .env file. Without one, Loski asks for its keys on a setup
+# page instead, so an empty copy of the example is enough.
 function Test-Env {
     if (Test-Path -LiteralPath '.env') { return $true }
-    Write-Problem "There's no .env file yet. Copy .env.example to .env and fill it in."
-    return $false
+    if (-not (Test-Path -LiteralPath '.env.example')) {
+        Write-Problem "There's no .env file, and no .env.example to start one from."
+        return $false
+    }
+    Copy-Item -LiteralPath '.env.example' -Destination '.env'
+    Write-Done 'Made a .env file. Loski asks for its Discord token and Spotify keys on a setup page.'
+    return $true
+}
+
+# The claim code in the log, while Loski has no owner yet.
+function Show-Claim([string]$Log) {
+    if ($Log -match 'DM (.+) "claim (\d{6})"') {
+        Write-Step "Make it yours: in Discord, send $($Matches[1]) a direct message saying: claim $($Matches[2])"
+    }
 }
 
 # When the container last started; changes whenever it's (re)created.
@@ -92,13 +109,21 @@ function Wait-Ready([datetime]$Since) {
     $deadline = (Get-Date).AddSeconds(120)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
-        $log = docker logs $Container --since $sinceArg 2>$null | Out-String
+        $log = docker logs $Container --since $sinceArg 2>&1 | Out-String
+        if ($log -match 'Setup needed') {
+            Write-Step "Loski needs its Discord token and Spotify keys: opening $SetupPage"
+            Start-Process $SetupPage
+            Write-Done 'Fill in the page; Loski carries on by itself once they check out.'
+            return $true
+        }
         if ($log -match 'Loski is ready') {
             Write-Done 'Loski is ready. Use /play in Discord.'
+            Show-Claim $log
             return $true
         }
         if ($log -match 'Spotify login needed') {
-            Write-Problem 'Spotify needs you to log in once: open http://127.0.0.1:5588/ in your browser.'
+            Write-Problem "Spotify needs you to log in once: open $SetupPage in your browser."
+            Show-Claim $log
             return $true
         }
         if ($log -match "Loski can't start: ([^\r\n]+)") {
@@ -246,6 +271,61 @@ switch ($Command) {
         }
         docker exec $Container loski selftest
         exit $LASTEXITCODE
+    }
+
+    'backup' {
+        if (-not (Test-Path -LiteralPath 'data')) {
+            Write-Problem "Nothing to back up yet: there's no data folder."
+            exit 1
+        }
+        $file = if ($Option) { $Option } else { "loski-backup-$(Get-Date -Format 'yyyy-MM-dd').tar.gz" }
+        $items = @('data')
+        if (Test-Path -LiteralPath '.env') { $items += '.env' }
+        Write-Step "Saving your history, mixes, settings and logins to $file"
+        # The logs stay behind; they're only for looking back on this computer.
+        tar -czf $file --exclude 'data/logs' --exclude '*.tmp' @items
+        if ($LASTEXITCODE -ne 0) {
+            Write-Problem 'The backup failed (see above).'
+            exit 1
+        }
+        $size = '{0:N1} MB' -f ((Get-Item -LiteralPath $file).Length / 1MB)
+        Write-Done "Saved $file ($size). It holds your tokens and Spotify login: keep it private."
+        Write-Done "On the other computer, put it in the Loski folder and run: loski restore $file"
+    }
+
+    'restore' {
+        if (-not $Option -or -not (Test-Path -LiteralPath $Option)) {
+            Write-Problem 'Say which backup to bring back, like: .\loski restore loski-backup-2026-10-26.tar.gz'
+            exit 1
+        }
+        $inside = tar -tzf $Option 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not ($inside | Where-Object { $_ -like 'data/*' })) {
+            Write-Problem "That doesn't look like a Loski backup (there's no data folder in it)."
+            exit 1
+        }
+        if ((Test-Docker) -and (Test-Running)) {
+            Write-Step 'Stopping Loski first'
+            docker compose stop
+        }
+        # What's here now is kept, in case the backup was the wrong one.
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        if (Test-Path -LiteralPath 'data') {
+            Rename-Item -LiteralPath 'data' -NewName "data.before-restore-$stamp"
+            Write-Done "Kept what was here in data.before-restore-$stamp"
+        }
+        if ((Test-Path -LiteralPath '.env') -and ($inside -contains '.env')) {
+            Copy-Item -LiteralPath '.env' -Destination ".env.before-restore-$stamp"
+        }
+        Write-Step "Bringing back $Option"
+        tar -xzf $Option
+        if ($LASTEXITCODE -ne 0) {
+            Write-Problem 'The backup could not be unpacked (see above).'
+            exit 1
+        }
+        Write-Done 'Restored.'
+        if (-not (Test-Env) -or -not (Start-Docker)) { exit 1 }
+        $build = -not (Test-Image) -and -not (Update-Image)
+        if (-not (Start-Loski -Build:$build)) { exit 1 }
     }
 
     'help' {

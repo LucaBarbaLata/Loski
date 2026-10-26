@@ -94,11 +94,11 @@ pub async fn mix(ix: &Ix, cmd: MixCmd) -> Result<()> {
                 Placement::End
             };
             let mix = find(&ix.app, &cmd.name)?;
-            let guild = commands::require_voice(ix)?;
+            let target = commands::require_voice(ix)?;
             ix.defer().await?;
             let card = load(
                 &ix.app,
-                guild,
+                target,
                 &mix,
                 cmd.shuffle.unwrap_or(false),
                 placement,
@@ -228,7 +228,7 @@ pub fn find(app: &App, name: &str) -> Result<Mix> {
 /// Looks the mix's songs up again (fresh covers and availability) and queues them.
 pub async fn load(
     app: &App,
-    guild: twilight_model::id::Id<twilight_model::id::marker::GuildMarker>,
+    target: commands::Target,
     mix: &Mix,
     shuffle: bool,
     placement: Placement,
@@ -261,7 +261,7 @@ pub async fn load(
     commands::enqueue(
         app,
         &core,
-        guild,
+        target,
         resolved.tracks,
         placement,
         resolved.source,
@@ -386,9 +386,9 @@ pub async fn play_from_card(ix: &Ix, rest: &str) -> Result<()> {
         Placement::End
     };
     let mix = find_exact(app, name)?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     ix.ack().await?;
-    let card = load(app, guild, &mix, false, placement).await?;
+    let card = load(app, target, &mix, false, placement).await?;
     ix.followup_temp(vec![card], SHORT_SECS).await
 }
 

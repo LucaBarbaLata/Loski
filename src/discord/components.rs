@@ -11,8 +11,9 @@ use twilight_model::{
 use super::{
     App, Core, ERROR_SECS, LONG_SECS, SHORT_SECS, cards,
     commands::{self, Placement},
+    friends::{self, Access},
     interact::Ix,
-    library, mixes, oops, panel, recap, requests, stats, voice,
+    library, lyrics, mixes, oops, panel, recap, requests, settings, sound, stats, voice,
 };
 use crate::{
     dsp::Filter,
@@ -22,6 +23,7 @@ use crate::{
         web::{SearchItem, SearchKind, Target},
     },
     track::TrackInfo,
+    util::escape_md,
 };
 
 /// How long a search card stays answerable.
@@ -34,11 +36,11 @@ pub async fn handle(app: Arc<App>, interaction: Interaction) {
     let Some(InteractionData::MessageComponent(data)) = interaction.data else {
         return;
     };
-    if !ix.is_owner() {
+    let id = data.custom_id.as_str();
+    if ix.access() < friends::component_needs(id) {
         let _ = ix.refuse().await;
         return;
     }
-    let id = data.custom_id.as_str();
     let value = data.values.first().map(String::as_str);
     let result = if let Some(nonce) = id.strip_prefix("pick:") {
         choose_result(&ix, nonce, value).await
@@ -49,7 +51,11 @@ pub async fn handle(app: Arc<App>, interaction: Interaction) {
     } else if let Some(nonce) = id.strip_prefix("pickcancel:") {
         cancel_pick(&ix, nonce).await
     } else if let Some(rest) = id.strip_prefix("req:") {
-        requests::answer(&ix, rest).await
+        requests::answer(&ix, rest, value).await
+    } else if let Some(key) = id.strip_prefix("loski:set:") {
+        settings::change(&ix, key, value).await
+    } else if let Some(key) = id.strip_prefix("loski:friends:") {
+        friends::change(&ix, key, &data.values).await
     } else if id.starts_with("loski:") {
         match ix.app.core.get().cloned() {
             Some(core) => loski(&ix, &core, id, value, message_id).await,
@@ -178,14 +184,12 @@ async fn play_result(ix: &Ix, rest: &str) -> Result<()> {
     };
 
     let core = app.core()?;
-    let guild = ix
-        .guild_id
-        .ok_or_else(|| oops("This only works in a server."))?;
+    let target = commands::require_voice(ix)?;
     // Loading and joining voice can take a moment; acknowledge first.
     ix.ack().await?;
     let outcome = match result_tracks(&core, item).await {
         Ok((tracks, source, note)) => {
-            commands::enqueue(app, &core, guild, tracks, placement, source, note).await
+            commands::enqueue(app, &core, target, tracks, placement, source, note).await
         }
         Err(e) => Err(e),
     };
@@ -247,9 +251,37 @@ async fn loski(
             engine.previous();
         }
         "loski:skip" => {
-            engine.skip(1);
-            // The panel gets reposted for the new song.
-            return ix.ack().await;
+            if ix.access() >= Access::Full {
+                engine.skip(1);
+                // The panel gets reposted for the new song.
+                return ix.ack().await;
+            }
+            // Anyone else in the call votes; more than half skips.
+            let track = engine
+                .current_track()
+                .ok_or_else(|| oops(personality::nothing_playing()))?;
+            let user = ix.user_id.map_or(0, |u| u.get());
+            let (votes, needed) = friends::vote_skip(app, &track, user)?;
+            if votes >= needed {
+                engine.skip(1);
+                ix.ack().await?;
+                if let Some(home) = app.ui.home() {
+                    let text = format!(
+                        "The call voted to skip **{}** ({votes} of {needed}).",
+                        escape_md(&track.title)
+                    );
+                    app.announce(home, cards::info(&app.icons, &text), SHORT_SECS)
+                        .await;
+                }
+                return Ok(());
+            }
+        }
+        "loski:like" => {
+            let track = engine
+                .current_track()
+                .ok_or_else(|| oops(personality::nothing_playing()))?;
+            let user = ix.user_id.map_or(0, |u| u.get());
+            friends::toggle_like(app, &track, user, &ix.user_name)?;
         }
         "loski:shuffle" => {
             engine.shuffle();
@@ -282,6 +314,39 @@ async fn loski(
             return Ok(());
         }
         "loski:more" => match value {
+            Some("filter:mine") => {
+                if let Err(reason) = engine.set_filter(Filter::Mine(app.prefs().eq)) {
+                    ix.update_message(vec![panel::current_card(app, &engine.snapshot())])
+                        .await?;
+                    return Err(oops(reason));
+                }
+            }
+            Some("eq") => {
+                let card = sound::eq_card(&app.icons, &sound::EqView::read(app), false);
+                return ix.reply_private(vec![card]).await;
+            }
+            // The compact panel keeps these here instead of on buttons.
+            Some("volup") => {
+                engine.set_volume((engine.volume() + 10).min(100));
+            }
+            Some("voldown") => {
+                engine.set_volume(engine.volume().saturating_sub(10));
+            }
+            Some("shuffle") => {
+                engine.shuffle();
+            }
+            Some("repeat") => {
+                engine.cycle_repeat();
+            }
+            Some("lyrics") => return lyrics::open(ix, core).await,
+            Some(v) if v.starts_with("filter:") => {
+                let filter = Filter::from_key(&v["filter:".len()..]).unwrap_or(Filter::Off);
+                if let Err(reason) = engine.set_filter(filter) {
+                    ix.update_message(vec![panel::current_card(app, &engine.snapshot())])
+                        .await?;
+                    return Err(oops(reason));
+                }
+            }
             Some("back15") => {
                 let now = engine.position_ms().unwrap_or(0);
                 engine.seek(now.saturating_sub(JUMP_MS));
@@ -323,7 +388,7 @@ async fn loski(
         },
         "loski:stop" => {
             ix.ack().await?;
-            voice::leave(app, Some(personality::goodbye())).await;
+            voice::send_away(app, Some(personality::goodbye())).await;
             return Ok(());
         }
         "loski:queue" => {
@@ -361,6 +426,13 @@ async fn loski(
         "loski:recap:save" => return recap::ask_mix_name(ix).await,
         "loski:recap:stats" => return recap::show_week(ix).await,
         "loski:mixsel" => return mixes::select(ix, value).await,
+        "loski:lyrics" => return lyrics::open(ix, core).await,
+        "loski:lyricsall" => return lyrics::show_all(ix, core).await,
+        "loski:lyricsclose" => {
+            ix.ack().await?;
+            lyrics::close(app).await;
+            return Ok(());
+        }
         "loski:mixback" => return mixes::select(ix, None).await,
         other => {
             if let Some(page) = other.strip_prefix("loski:qpage:") {
@@ -392,6 +464,22 @@ async fn loski(
             }
             if let Some(rest) = other.strip_prefix("loski:hgo:") {
                 return replay_from_history(ix, core, rest).await;
+            }
+            if let Some(rest) = other.strip_prefix("loski:eq:") {
+                return sound::eq_action(ix, rest, value).await;
+            }
+            if let Some(id) = other.strip_prefix("loski:undo:") {
+                let count = engine.undo(id.parse().unwrap_or(0)).map_err(oops)?;
+                let text = match count {
+                    0 => "Put the queue back.".to_string(),
+                    1 => "Put the queue back: 1 song coming up.".to_string(),
+                    n => format!("Put the queue back: {n} songs coming up."),
+                };
+                let card = cards::toast(&app.icons, &text, None, cards::color::SUCCESS);
+                return ix.update_message(vec![card]).await;
+            }
+            if let Some(rest) = other.strip_prefix("loski:lyricspage:") {
+                return lyrics::turn_page(ix, core, rest).await;
             }
             if let Some(rest) = other.strip_prefix("loski:mixgo:") {
                 return mixes::play_from_card(ix, rest).await;
@@ -428,7 +516,7 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
     let Some(InteractionData::ModalSubmit(data)) = interaction.data else {
         return;
     };
-    if !ix.is_owner() {
+    if ix.access() < friends::modal_needs(&data.custom_id) {
         let _ = ix.refuse().await;
         return;
     }
@@ -437,6 +525,7 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
         "loski:m:seek" => seek_form(&ix, &text("time"), message).await,
         "loski:m:qsave" => save_queue_form(&ix, &text("name")).await,
         "loski:m:recapsave" => recap::save_mix(&ix, &text("name")).await,
+        "loski:m:tz" => settings::set_timezone(&ix, &text("tz")).await,
         id => match id.strip_prefix("loski:m:mixren:") {
             Some(old) => mixes::rename(&ix, old, &text("name")).await,
             None => ix.ack().await,
@@ -486,9 +575,25 @@ async fn save_queue_form(ix: &Ix, name: &str) -> Result<()> {
     .await
 }
 
-fn history_card(app: &App, selected: Option<&str>) -> twilight_model::channel::message::Component {
-    let entries = app.store.recent_history(panel::HISTORY_SIZE);
-    panel::history_card(&app.icons, app.ui.color(), &entries, selected)
+/// The history card for the last /history search (or recent plays).
+pub(super) fn history_card(
+    app: &App,
+    selected: Option<&str>,
+) -> twilight_model::channel::message::Component {
+    let (filter, about) = app.history_view.lock().clone();
+    if filter.is_empty() {
+        let entries = app.store.recent_history(panel::HISTORY_SIZE);
+        return panel::history_card(&app.icons, app.ui.color(), &entries, selected, None);
+    }
+    let (entries, total) =
+        crate::stats::search_history(app.store.all_history(), &filter, panel::HISTORY_SIZE);
+    panel::history_card(
+        &app.icons,
+        app.ui.color(),
+        &entries,
+        selected,
+        Some((&about, total)),
+    )
 }
 
 /// `how:track-id` from the history card: play a past song again.
@@ -502,7 +607,7 @@ async fn replay_from_history(ix: &Ix, core: &Core, rest: &str) -> Result<()> {
     };
     let id = librespot_core::SpotifyId::from_base62(track_id)
         .map_err(|_| oops("I couldn't find that song again."))?;
-    let guild = commands::require_voice(ix)?;
+    let target = commands::require_voice(ix)?;
     ix.ack().await?;
     let resolved = core
         .spotify
@@ -510,7 +615,7 @@ async fn replay_from_history(ix: &Ix, core: &Core, rest: &str) -> Result<()> {
         .await
         .map_err(|e| oops(format!("Hmm, {e}")))?
         .ok_or_else(|| oops("I couldn't find that song again."))?;
-    let card = commands::enqueue(app, core, guild, resolved.tracks, placement, None, None).await?;
+    let card = commands::enqueue(app, core, target, resolved.tracks, placement, None, None).await?;
     // The history card goes back to its list, ready for another pick.
     app.http
         .interaction(app.app_id)

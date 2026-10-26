@@ -8,7 +8,7 @@ use twilight_model::channel::message::Component;
 
 use chrono::TimeZone;
 
-use super::{Pick, cards, commands, icons::Icons, mixes, panel, stats, status};
+use super::{Pick, cards, commands, icons::Icons, mixes, panel, settings, sound, stats, status};
 use crate::{
     engine::{Health, QueueView, Repeat, Snapshot, Status},
     spotify::web::{SearchItem, SearchKind, Target},
@@ -41,6 +41,7 @@ fn track(n: u8, long: bool) -> Arc<TrackInfo> {
         explicit: n % 2 == 0,
         year: Some(2011),
         from: Some("the playlist **Late night, long drives**".into()),
+        requested_by: None,
     })
 }
 
@@ -99,17 +100,24 @@ fn now_playing_card_is_valid_in_every_state() {
             for repeat in [Repeat::Off, Repeat::Track, Repeat::Queue] {
                 for long in [false, true] {
                     for banner in [None, Some("attachment://banner.jpg")] {
-                        assert_valid(panel::now_playing_card(
-                            &icons,
-                            0x336699,
-                            &snapshot(status, following, repeat, long),
-                            banner,
-                        ));
-                        let connect = Snapshot {
-                            connect: true,
-                            ..snapshot(status, false, repeat, long)
-                        };
-                        assert_valid(panel::now_playing_card(&icons, 0x336699, &connect, banner));
+                        for (look, room) in looks().into_iter().zip(rooms(long)) {
+                            assert_valid(panel::now_playing_card(
+                                &icons,
+                                0x336699,
+                                &snapshot(status, following, repeat, long),
+                                banner,
+                                look,
+                                &room,
+                            ));
+                            let connect = Snapshot {
+                                connect: true,
+                                filter: crate::dsp::Filter::Mine([4, 2, 0, -2, 8]),
+                                ..snapshot(status, false, repeat, long)
+                            };
+                            assert_valid(panel::now_playing_card(
+                                &icons, 0x336699, &connect, banner, look, &room,
+                            ));
+                        }
                     }
                 }
             }
@@ -121,7 +129,90 @@ fn now_playing_card_is_valid_in_every_state() {
         upcoming: 0,
         ..snapshot(Status::Idle, false, Repeat::Off, false)
     };
-    assert_valid(panel::now_playing_card(&icons, 0x336699, &empty, None));
+    for (look, room) in looks().into_iter().zip(rooms(true)) {
+        assert_valid(panel::now_playing_card(
+            &icons, 0x336699, &empty, None, look, &room,
+        ));
+    }
+}
+
+/// Nobody (Loski isn't in voice), a few people, and a crowded call.
+fn rooms(long: bool) -> [super::friends::RoomView; 3] {
+    let names = |n: usize| -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                if long {
+                    format!("{i} A Very Long Nickname_With *Stars* and more")
+                } else {
+                    format!("Friend {i}")
+                }
+            })
+            .collect()
+    };
+    [
+        super::friends::RoomView::default(),
+        super::friends::RoomView {
+            listeners: names(3),
+            liked_by: names(1),
+            votes: None,
+        },
+        super::friends::RoomView {
+            listeners: names(25),
+            liked_by: names(25),
+            votes: Some((7, 13)),
+        },
+    ]
+}
+
+fn looks() -> [panel::Look; 3] {
+    [
+        panel::Look::default(),
+        panel::Look {
+            compact: true,
+            staying: false,
+        },
+        panel::Look {
+            compact: true,
+            staying: true,
+        },
+    ]
+}
+
+#[test]
+fn settings_and_my_sound_cards_are_valid() {
+    use crate::config::AudioBitrate;
+    use std::time::Duration;
+    let icons = Icons::default();
+    let channel = twilight_model::id::Id::new(42);
+    for always_on in [false, true] {
+        for (bitrate, leave, crossfade) in [
+            (AudioBitrate::Auto, 60, 0),
+            (AudioBitrate::Fixed(160_000), 45, 5),
+            (AudioBitrate::Fixed(384_000), 0, 12),
+        ] {
+            let view = settings::SettingsView {
+                panel_channel: always_on.then_some(channel),
+                compact: always_on,
+                always_on,
+                staying_in: always_on.then_some(channel),
+                leave_after: Duration::from_secs(leave),
+                idle_leave: Duration::from_secs(7_200),
+                crossfade_secs: crossfade,
+                normalise: always_on,
+                bitrate,
+                timezone: "America/Argentina/ComodRivadavia".into(),
+            };
+            assert_valid(settings::settings_card(&icons, &view));
+        }
+    }
+    for gains in [[0; 5], [8, -8, 2, -2, 6]] {
+        for on in [false, true] {
+            for from_settings in [false, true] {
+                let view = sound::EqView { gains, on };
+                assert_valid(sound::eq_card(&icons, &view, from_settings));
+            }
+        }
+    }
 }
 
 #[test]
@@ -160,18 +251,26 @@ fn history_and_toasts_are_valid() {
         .map(|n| HistoryEntry {
             played_at: 1_760_000_000 + n,
             uri: "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into(),
-            title: "A Song With A Fairly Long Name (Remastered 2011)".into(),
-            artists: "Some Artist, Another Artist".into(),
+            title: "A Song With A Fairly Long Name (Remastered 2011) - Deluxe Edition Bonus".into(),
+            artists: "Some Artist, Another Artist, And A Third Artist Too".into(),
             artist_list: Vec::new(),
-            cover: None,
+            // The newest ones show their covers; some songs have none.
+            cover: (n % 3 != 1).then(|| "https://i.scdn.co/image/ab67616d00004851cover".into()),
             listened_ms: Some(200_000),
+            with: Vec::new(),
+            requested_by: (n % 4 == 0).then_some(9),
         })
         .collect();
     let id = entries[0].track_id().to_string();
-    for selected in [None, Some(id.as_str()), Some("gone")] {
-        assert_valid(panel::history_card(&icons, 0x445566, &entries, selected));
+    let about = "“a *very* long search”".repeat(4) + " · the last 7 days · with **Ana**";
+    for search in [None, Some((about.as_str(), 12_345))] {
+        for selected in [None, Some(id.as_str()), Some("gone")] {
+            assert_valid(panel::history_card(
+                &icons, 0x445566, &entries, selected, search,
+            ));
+        }
+        assert_valid(panel::history_card(&icons, 0x445566, &[], None, search));
     }
-    assert_valid(panel::history_card(&icons, 0x445566, &[], None));
     assert_valid(cards::toast(
         &icons,
         "Queued **Song**",
@@ -221,7 +320,7 @@ fn help_card_is_valid() {
 #[test]
 fn command_definitions_are_valid() {
     let definitions = commands::definitions();
-    assert_eq!(definitions.len(), 33);
+    assert_eq!(definitions.len(), 36);
     for command in &definitions {
         if let Err(e) = twilight_validate::command::command(command) {
             panic!("/{} is invalid: {e}", command.name);
@@ -247,6 +346,8 @@ fn busy_history() -> Vec<HistoryEntry> {
             ],
             cover: Some("https://i.scdn.co/image/ab67616d00004851aaaa".into()),
             listened_ms: Some(180_000 + n as u64 * 1000),
+            with: vec![n as u64 % 3 + 1],
+            requested_by: None,
         })
         .collect()
 }
@@ -258,9 +359,18 @@ fn stats_cards_are_valid() {
         .with_ymd_and_hms(2026, 10, 21, 20, 0, 0)
         .unwrap();
     let history = busy_history();
+    // Every artist with a few long genres.
+    let genres: crate::genres::GenreMap = (0..9)
+        .map(|n| {
+            (
+                format!("artist {n} with a long name **"),
+                vec![format!("{n} very *long* genre name indeed"); 4],
+            )
+        })
+        .collect();
     for range in Range::TABS {
         for entries in [&history[..], &[]] {
-            let stats = crate::stats::compute(entries, range, now);
+            let stats = crate::stats::compute(entries, range, now, &genres);
             assert_valid(stats::stats_card(&icons, &stats, None));
             assert_valid(stats::stats_card(
                 &icons,
@@ -276,6 +386,7 @@ fn stats_cards_are_valid() {
             month: 9,
         },
         now,
+        &genres,
     );
     assert!(recap.plays > 0);
     assert_valid(stats::recap_card(&icons, &recap, None));
@@ -284,6 +395,25 @@ fn stats_cards_are_valid() {
         &recap,
         Some("attachment://stats.jpg"),
     ));
+    assert!(!recap.top_genres.is_empty() && !recap.together.is_empty());
+
+    let name = |id: u64| format!("Friend_{id} with a *really* long nickname");
+    let all = crate::stats::compute(&history, Range::AllTime, now, &genres);
+    assert_valid(stats::together_card(&icons, &all.together, name));
+    assert_valid(stats::together_card(&icons, &[], name));
+
+    let year = crate::stats::compute(&history, Range::Year(2026), now, &genres);
+    for pictures in [
+        &[][..],
+        &["attachment://wrapped.jpg"][..],
+        &["attachment://wrapped.jpg", "attachment://stats.jpg"][..],
+    ] {
+        for so_far in [false, true] {
+            assert_valid(stats::wrapped_card(
+                &icons, &year, 2026, so_far, pictures, name,
+            ));
+        }
+    }
 }
 
 fn mix(n: usize, songs: usize) -> Mix {
@@ -345,6 +475,7 @@ fn status_card_is_valid_in_every_state() {
             memory_mb: Some(58),
             timezone: "Europe/Bucharest".into(),
             device_name: "Loski".into(),
+            newer: Some("2.1.0".into()),
         },
         status::Report {
             spotify: status::Spotify::Reconnecting,
@@ -356,6 +487,7 @@ fn status_card_is_valid_in_every_state() {
             memory_mb: None,
             timezone: "UTC".into(),
             device_name: "Loski".into(),
+            newer: None,
         },
         status::Report {
             spotify: status::Spotify::LoggedOut,
@@ -367,6 +499,7 @@ fn status_card_is_valid_in_every_state() {
             memory_mb: None,
             timezone: "UTC".into(),
             device_name: "Loski".into(),
+            newer: None,
         },
     ];
     for report in &reports {
@@ -382,27 +515,116 @@ fn recap_card_is_valid() {
             track: track(n % 7, true),
             started_at: 1_760_000_000 + n as i64 * 200,
             listened_ms: 190_000,
+            with: (0..n as u64 % 12).collect(),
         })
         .collect();
-    let recap = super::recap::Recap::from_plays(&plays).unwrap();
+    let mut recap =
+        super::recap::Recap::from_plays(&plays, |id| format!("Friend_{id} *with a long name*"))
+            .unwrap();
+    recap.liked = (0..5)
+        .map(|n| (track(n, true), vec!["Ana".to_string(), "Vlad *".repeat(20)]))
+        .collect();
     assert!(recap.favourite.is_some());
     for farewell in [None, Some("Off I go. That was a good one.")] {
         assert_valid(super::recap::recap_card(&icons, 0x334455, &recap, farewell));
     }
-    let one = super::recap::Recap::from_plays(&plays[..1]).unwrap();
+    let one = super::recap::Recap::from_plays(&plays[..1], |_| String::new()).unwrap();
     assert_valid(super::recap::recap_card(&icons, 0x334455, &one, None));
 }
 
 #[test]
-fn request_card_is_valid() {
+fn requests_card_is_valid() {
+    use super::requests::{Request, requests_card};
     let icons = Icons::default();
     for long in [false, true] {
-        let song = (*track(4, long)).clone();
-        let by = if long {
-            "A Very Long Nickname_With *Stars* ".repeat(3)
-        } else {
-            "Ana".to_string()
-        };
-        assert_valid(super::requests::request_card(&icons, &song, &by, u64::MAX));
+        let open: Vec<Request> = (0..30u8)
+            .map(|n| Request {
+                nonce: u64::MAX - n as u64,
+                track: (*track(n, long)).clone(),
+                by: if long {
+                    "A Very Long Nickname_With *Stars* ".repeat(3)
+                } else {
+                    "Ana".to_string()
+                },
+                by_id: n as u64,
+                asked_at: 1_760_000_000,
+                at: std::time::Instant::now(),
+            })
+            .collect();
+        for count in [1, 2, 6, 7, 30] {
+            assert_valid(requests_card(&icons, &open[..count], None));
+            assert_valid(requests_card(&icons, &open[..count], Some(open[0].nonce)));
+        }
     }
+}
+
+#[test]
+fn friends_card_is_valid() {
+    let icons = Icons::default();
+    let mut prefs = crate::store::Prefs::default();
+    assert_valid(super::friends::friends_card(&icons, &prefs));
+    prefs.co_djs = (1..=10).collect();
+    prefs.dj_role = Some(77);
+    prefs.djs_queue_only = true;
+    prefs.vote_skip_off = true;
+    assert_valid(super::friends::friends_card(&icons, &prefs));
+}
+
+#[test]
+fn update_card_is_valid() {
+    let icons = Icons::default();
+    for body in [
+        None,
+        Some("## What's new\n".to_string() + &"- A *long* change line\n".repeat(200)),
+    ] {
+        let release = super::updates::Release {
+            tag_name: "v2.1.0".into(),
+            body,
+            html_url: "https://github.com/LucaBarbaLata/Loski/releases/tag/v2.1.0".into(),
+        };
+        assert_valid(super::updates::update_card(&icons, &release));
+    }
+}
+
+#[test]
+fn lyrics_cards_are_valid() {
+    use super::lyrics::{Line, Lyrics, live_card, page_card};
+    let icons = Icons::default();
+    let song = (*track(5, true)).clone();
+    let synced = Lyrics {
+        lines: (0..80)
+            .map(|i| Line {
+                start_ms: Some(i * 3_000),
+                text: if i % 9 == 0 {
+                    String::new()
+                } else {
+                    format!("A *made up* line number {i} {}", "la ".repeat(40))
+                },
+            })
+            .collect(),
+        synced: true,
+        instrumental: false,
+        source: "Musixmatch".into(),
+        color: Some(0x335577),
+    };
+    let unsynced = Lyrics {
+        synced: false,
+        ..synced.clone()
+    };
+    let instrumental = Lyrics {
+        lines: Vec::new(),
+        instrumental: true,
+        ..synced.clone()
+    };
+    for line in [None, Some(0), Some(40), Some(79)] {
+        assert_valid(live_card(&icons, Some(&song), Some(&synced), line));
+    }
+    assert_valid(live_card(&icons, Some(&song), Some(&unsynced), None));
+    assert_valid(live_card(&icons, Some(&song), Some(&instrumental), None));
+    assert_valid(live_card(&icons, Some(&song), None, None));
+    assert_valid(live_card(&icons, None, None, None));
+    for page in [0, 1, 99] {
+        assert_valid(page_card(&icons, &song, &unsynced, page));
+    }
+    assert_valid(page_card(&icons, &song, &instrumental, 0));
 }

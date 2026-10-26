@@ -80,6 +80,10 @@ icons! {
     Problem => "problem", "⚠️";
     Info => "info", "ℹ️";
     Music => "music", "🎵";
+    Lyrics => "lyrics", "🎤";
+    Settings => "settings", "⚙️";
+    Undo => "undo", "↩️";
+    Friends => "friends", "👥";
     BarStartOn => "bar_start_on", "▬";
     BarMidOn => "bar_mid_on", "▬";
     BarEndOn => "bar_end_on", "▬";

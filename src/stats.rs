@@ -1,12 +1,13 @@
-//! Listening stats from the history: totals, top songs and artists, streaks
-//! and when you listen, counted in calendar days of your own timezone.
+//! Listening stats from the history: totals, top songs, artists and genres,
+//! streaks, who you listened with and when you listen, counted in calendar
+//! days of your own timezone. Also the search behind /history.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, Days, Months, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 
-use crate::store::HistoryEntry;
+use crate::{genres::GenreMap, store::HistoryEntry};
 
 /// Songs played before listening time was tracked count as an average song.
 const LEGACY_LISTEN_MS: u64 = 210_000;
@@ -25,6 +26,8 @@ pub enum Range {
         year: i32,
         month: u32,
     },
+    /// A calendar year (so far, if it's this one), for Loski Wrapped.
+    Year(i32),
 }
 
 impl Range {
@@ -36,6 +39,7 @@ impl Range {
             Range::Month => "month",
             Range::AllTime => "all",
             Range::WholeMonth { .. } => "recap",
+            Range::Year(_) => "year",
         }
     }
 
@@ -49,6 +53,7 @@ impl Range {
             Range::Month => "Month",
             Range::AllTime => "All time",
             Range::WholeMonth { .. } => "Recap",
+            Range::Year(_) => "Year",
         }
     }
 }
@@ -74,6 +79,17 @@ pub struct TopArtist {
     pub name: String,
     pub plays: u32,
     pub listened_ms: u64,
+}
+
+/// A friend you listened with, and what you played together.
+#[derive(Debug, Clone)]
+pub struct Together {
+    /// Their Discord user id.
+    pub friend: u64,
+    pub plays: u32,
+    pub listened_ms: u64,
+    /// The songs you played most with them.
+    pub top_songs: Vec<TopSong>,
 }
 
 /// One bar of the activity chart: a day, or a month for "all time".
@@ -108,6 +124,12 @@ pub struct Stats {
     pub peak_hour: Option<u32>,
     /// The same stretch just before this one, and how much you listened then.
     pub previous: Option<(NaiveDate, NaiveDate, u64)>,
+    /// The day you listened most, and how long.
+    pub best_day: Option<(NaiveDate, u64)>,
+    /// Genres by listening time, most first (only artists with known genres).
+    pub top_genres: Vec<(String, u64)>,
+    /// Friends you listened with, most time together first.
+    pub together: Vec<Together>,
 }
 
 struct Play<'a> {
@@ -161,6 +183,16 @@ fn span(range: Range, today: NaiveDate, first_play: Option<NaiveDate>) -> Span {
                 .map(|p| (p, last_of_month(p)));
             (first, last_of_month(first), previous)
         }
+        Range::Year(year) => {
+            let first = NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(today);
+            let end = NaiveDate::from_ymd_opt(year, 12, 31).unwrap_or(today);
+            let previous = NaiveDate::from_ymd_opt(year - 1, 1, 1).zip(NaiveDate::from_ymd_opt(
+                year - 1,
+                12,
+                31,
+            ));
+            (first, end.min(today.max(first)), previous)
+        }
     }
 }
 
@@ -193,7 +225,40 @@ fn current_streak(active: &HashSet<NaiveDate>, today: NaiveDate) -> u32 {
     streak
 }
 
-pub fn compute(history: &[HistoryEntry], range: Range, now: DateTime<Tz>) -> Stats {
+/// Adds one play of `entry` to the song tally.
+fn tally_song<'a>(songs: &mut HashMap<&'a str, TopSong>, entry: &'a HistoryEntry, ms: u64) {
+    let song = songs.entry(&entry.uri).or_insert_with(|| TopSong {
+        uri: entry.uri.clone(),
+        title: String::new(),
+        artists: String::new(),
+        cover: None,
+        plays: 0,
+        listened_ms: 0,
+    });
+    song.plays += 1;
+    song.listened_ms += ms;
+    // Later plays carry the freshest name and cover.
+    song.title.clone_from(&entry.title);
+    song.artists.clone_from(&entry.artists);
+    if entry.cover.is_some() {
+        song.cover.clone_from(&entry.cover);
+    }
+}
+
+fn ranked_songs(songs: HashMap<&str, TopSong>) -> Vec<TopSong> {
+    let mut top: Vec<TopSong> = songs.into_values().collect();
+    top.sort_by(|a, b| (b.plays, b.listened_ms, &a.title).cmp(&(a.plays, a.listened_ms, &b.title)));
+    top
+}
+
+/// Counts what played in `range`. `genres` holds what's known about each
+/// artist's genres (see `genres.rs`).
+pub fn compute(
+    history: &[HistoryEntry],
+    range: Range,
+    now: DateTime<Tz>,
+    genres: &GenreMap,
+) -> Stats {
     let tz = now.timezone();
     let today = now.date_naive();
     let plays: Vec<Play> = history
@@ -216,6 +281,8 @@ pub fn compute(history: &[HistoryEntry], range: Range, now: DateTime<Tz>) -> Sta
 
     let mut songs: HashMap<&str, TopSong> = HashMap::new();
     let mut artists: HashMap<&str, TopArtist> = HashMap::new();
+    let mut genre_ms: HashMap<&str, u64> = HashMap::new();
+    let mut friends: HashMap<u64, (u32, u64, HashMap<&str, TopSong>)> = HashMap::new();
     let mut hours = [0u64; 24];
     let mut by_day: HashMap<NaiveDate, u64> = HashMap::new();
     let (mut count, mut total) = (0u32, 0u64);
@@ -225,23 +292,7 @@ pub fn compute(history: &[HistoryEntry], range: Range, now: DateTime<Tz>) -> Sta
         total += play.ms;
         hours[play.hour as usize] += play.ms;
         *by_day.entry(play.day).or_default() += play.ms;
-
-        let song = songs.entry(&entry.uri).or_insert_with(|| TopSong {
-            uri: entry.uri.clone(),
-            title: String::new(),
-            artists: String::new(),
-            cover: None,
-            plays: 0,
-            listened_ms: 0,
-        });
-        song.plays += 1;
-        song.listened_ms += play.ms;
-        // Later plays carry the freshest name and cover.
-        song.title.clone_from(&entry.title);
-        song.artists.clone_from(&entry.artists);
-        if entry.cover.is_some() {
-            song.cover.clone_from(&entry.cover);
-        }
+        tally_song(&mut songs, entry, play.ms);
 
         for name in entry.artist_names() {
             let artist = artists.entry(name).or_insert_with(|| TopArtist {
@@ -251,21 +302,56 @@ pub fn compute(history: &[HistoryEntry], range: Range, now: DateTime<Tz>) -> Sta
             });
             artist.plays += 1;
             artist.listened_ms += play.ms;
+            if let Some(known) = genres.get(&name.to_lowercase()) {
+                // The artist's main genres; the rest are often too broad.
+                for genre in known.iter().take(2) {
+                    *genre_ms.entry(genre).or_default() += play.ms;
+                }
+            }
+        }
+
+        for friend in &entry.with {
+            let (plays, ms, songs) = friends.entry(*friend).or_default();
+            *plays += 1;
+            *ms += play.ms;
+            tally_song(songs, entry, play.ms);
         }
     }
 
     let distinct_songs = songs.len();
     let distinct_artists = artists.len();
-    let mut top_songs: Vec<TopSong> = songs.into_values().collect();
-    top_songs.sort_by(|a, b| {
-        (b.plays, b.listened_ms, &a.title).cmp(&(a.plays, a.listened_ms, &b.title))
-    });
+    let top_songs = ranked_songs(songs);
     let mut top_artists: Vec<TopArtist> = artists.into_values().collect();
     top_artists
         .sort_by(|a, b| (b.plays, b.listened_ms, &a.name).cmp(&(a.plays, a.listened_ms, &b.name)));
+    let mut top_genres: Vec<(String, u64)> = genre_ms
+        .into_iter()
+        .map(|(genre, ms)| (genre.to_string(), ms))
+        .collect();
+    top_genres.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut together: Vec<Together> = friends
+        .into_iter()
+        .map(|(friend, (plays, listened_ms, songs))| Together {
+            friend,
+            plays,
+            listened_ms,
+            top_songs: ranked_songs(songs).into_iter().take(3).collect(),
+        })
+        .collect();
+    together.sort_by(|a, b| {
+        b.listened_ms
+            .cmp(&a.listened_ms)
+            .then(a.friend.cmp(&b.friend))
+    });
+    let best_day = by_day
+        .iter()
+        .max_by_key(|(day, ms)| (**ms, std::cmp::Reverse(**day)))
+        .map(|(day, ms)| (*day, *ms));
 
-    // All time goes by month once there are a couple of months to show.
-    let monthly_bars = range == Range::AllTime && (last_day - first_day).num_days() > 62;
+    // All time goes by month once there are a couple of months to show; a
+    // year always does.
+    let monthly_bars = matches!(range, Range::Year(_))
+        || (range == Range::AllTime && (last_day - first_day).num_days() > 62);
     let bars = if monthly_bars {
         let mut months: Vec<NaiveDate> = Vec::new();
         let mut month = first_of_month(first_day);
@@ -329,7 +415,94 @@ pub fn compute(history: &[HistoryEntry], range: Range, now: DateTime<Tz>) -> Sta
         best_streak: longest_run(&active, first_day, last_day),
         peak_hour,
         previous,
+        best_day,
+        top_genres,
+        together,
     }
+}
+
+/// What /history looks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryFilter {
+    /// Words that all have to be in the title or the artists.
+    pub search: Option<String>,
+    /// Only plays from this time on (Unix seconds).
+    pub since: Option<i64>,
+    /// Only songs played with this friend in the call, or asked for by them.
+    pub with: Option<u64>,
+    /// Only songs a friend asked for.
+    pub requests: bool,
+}
+
+impl HistoryFilter {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn matches(&self, entry: &HistoryEntry) -> bool {
+        if self.since.is_some_and(|since| entry.played_at < since) {
+            return false;
+        }
+        if self.requests && entry.requested_by.is_none() {
+            return false;
+        }
+        if let Some(friend) = self.with
+            && !entry.with.contains(&friend)
+            && entry.requested_by != Some(friend)
+        {
+            return false;
+        }
+        match &self.search {
+            Some(words) => {
+                let haystack = format!("{} {}", entry.title, entry.artists).to_lowercase();
+                words
+                    .to_lowercase()
+                    .split_whitespace()
+                    .all(|word| haystack.contains(word))
+            }
+            None => true,
+        }
+    }
+}
+
+/// The newest plays matching `filter` (up to `limit`), and how many match in all.
+pub fn search_history(
+    history: Vec<HistoryEntry>,
+    filter: &HistoryFilter,
+    limit: usize,
+) -> (Vec<HistoryEntry>, usize) {
+    let mut found: Vec<HistoryEntry> = history
+        .into_iter()
+        .rev()
+        .filter(|e| filter.matches(e))
+        .collect();
+    let total = found.len();
+    found.truncate(limit);
+    (found, total)
+}
+
+/// Your most played songs since `since` (Unix seconds), most played first.
+pub fn top_uris(history: &[HistoryEntry], since: i64, limit: usize) -> Vec<String> {
+    let mut plays: HashMap<&str, (u32, i64)> = HashMap::new();
+    for entry in history.iter().filter(|e| e.played_at >= since) {
+        let song = plays.entry(&entry.uri).or_default();
+        song.0 += 1;
+        song.1 = song.1.max(entry.played_at);
+    }
+    let mut songs: Vec<_> = plays.into_iter().collect();
+    songs.sort_by(|a, b| (b.1.0, b.1.1, a.0).cmp(&(a.1.0, a.1.1, b.0)));
+    songs
+        .into_iter()
+        .take(limit)
+        .map(|(uri, _)| uri.to_string())
+        .collect()
+}
+
+/// The year to send Loski Wrapped for, once a new year has begun.
+/// `last_sent` is the year the previous Wrapped covered.
+pub fn wrapped_due(now: DateTime<Tz>, last_sent: Option<&str>) -> Option<i32> {
+    let year = now.year() - 1;
+    (last_sent != Some(year.to_string().as_str())).then_some(year)
 }
 
 /// The month to send a recap for, as "YYYY-MM", once a new month has begun.
@@ -361,6 +534,8 @@ mod tests {
             artist_list: artists.iter().map(|a| a.to_string()).collect(),
             cover: None,
             listened_ms: Some(minutes * 60_000),
+            with: Vec::new(),
+            requested_by: None,
         }
     }
 
@@ -392,7 +567,7 @@ mod tests {
 
     #[test]
     fn week_counts_the_last_seven_local_days() {
-        let stats = compute(&history(), Range::Week, now());
+        let stats = compute(&history(), Range::Week, now(), &GenreMap::new());
         assert_eq!(stats.first_day.day(), 15);
         assert_eq!(stats.bars.len(), 7);
         assert_eq!(stats.plays, 6);
@@ -419,7 +594,7 @@ mod tests {
 
     #[test]
     fn month_and_all_time() {
-        let month = compute(&history(), Range::Month, now());
+        let month = compute(&history(), Range::Month, now(), &GenreMap::new());
         assert_eq!(month.plays, 8);
         assert_eq!(month.bars.len(), 21);
         assert_eq!(month.best_streak, 4);
@@ -427,14 +602,14 @@ mod tests {
         assert_eq!((first.month(), first.day(), last.day()), (9, 1, 21));
 
         // Three weeks of history: still charted day by day.
-        let all = compute(&history(), Range::AllTime, now());
+        let all = compute(&history(), Range::AllTime, now(), &GenreMap::new());
         assert!(!all.monthly_bars);
         assert_eq!(all.bars.len(), 21);
         assert!(all.previous.is_none());
 
         // A year on, by month.
         let later = Bucharest.with_ymd_and_hms(2027, 9, 2, 12, 0, 0).unwrap();
-        let all = compute(&history(), Range::AllTime, later);
+        let all = compute(&history(), Range::AllTime, later, &GenreMap::new());
         assert!(all.monthly_bars);
         assert_eq!(all.bars.len(), 12);
         assert_eq!(all.bars[0].first_day.month(), 10);
@@ -450,6 +625,7 @@ mod tests {
                 month: 10,
             },
             Bucharest.with_ymd_and_hms(2026, 11, 1, 9, 0, 0).unwrap(),
+            &GenreMap::new(),
         );
         assert_eq!(recap.plays, 8);
         assert_eq!(recap.bars.len(), 31);
@@ -469,7 +645,7 @@ mod tests {
         old.listened_ms = None;
         old.artist_list.clear();
         old.artists = "Tyler, The Creator".into();
-        let stats = compute(&[old], Range::Week, now());
+        let stats = compute(&[old], Range::Week, now(), &GenreMap::new());
         assert_eq!(stats.plays, 1);
         assert_eq!(stats.listened_ms, LEGACY_LISTEN_MS);
         // Without the list, the joined name is split the old way.
@@ -477,8 +653,81 @@ mod tests {
     }
 
     #[test]
+    fn genres_friends_and_the_best_day() {
+        let mut history = history();
+        history[2].with = vec![7];
+        history[4].with = vec![7, 8];
+        history[5].with = vec![8];
+        let genres: GenreMap = [
+            (
+                "breaking benjamin".to_string(),
+                vec!["alternative metal".to_string(), "post-grunge".to_string()],
+            ),
+            ("saliva".to_string(), vec!["nu metal".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        let stats = compute(&history, Range::Month, now(), &genres);
+        assert_eq!(
+            stats.top_genres[0],
+            ("alternative metal".to_string(), 19 * 60_000)
+        );
+        assert_eq!(stats.top_genres[2], ("nu metal".to_string(), 6 * 60_000));
+        assert_eq!(stats.together.len(), 2);
+        assert_eq!(stats.together[0].friend, 7);
+        assert_eq!(stats.together[0].listened_ms, 8 * 60_000);
+        assert_eq!(stats.together[0].top_songs[0].uri, "spotify:track:a");
+        assert_eq!(stats.best_day.map(|(d, _)| d.day()), Some(1));
+    }
+
+    #[test]
+    fn a_year_goes_by_month() {
+        let year = compute(&history(), Range::Year(2026), now(), &GenreMap::new());
+        assert!(year.monthly_bars);
+        assert_eq!(year.bars.len(), 10, "January to October so far");
+        assert_eq!(year.plays, 8);
+        let last_year = compute(
+            &history(),
+            Range::Year(2026),
+            Bucharest.with_ymd_and_hms(2027, 1, 1, 9, 0, 0).unwrap(),
+            &GenreMap::new(),
+        );
+        assert_eq!(last_year.bars.len(), 12);
+        let new_year = Bucharest.with_ymd_and_hms(2027, 1, 1, 0, 5, 0).unwrap();
+        assert_eq!(wrapped_due(new_year, Some("2025")), Some(2026));
+        assert_eq!(wrapped_due(new_year, Some("2026")), None);
+    }
+
+    #[test]
+    fn history_search_and_filters() {
+        let mut history = history();
+        history[3].with = vec![7];
+        history[6].requested_by = Some(8);
+        let words = HistoryFilter {
+            search: Some("benjamin SONG".into()),
+            ..HistoryFilter::default()
+        };
+        let (found, total) = search_history(history.clone(), &words, 2);
+        assert_eq!((found.len(), total), (2, 5));
+        // Newest first.
+        assert_eq!(found[0].played_at, at(21, 10));
+        let with = HistoryFilter {
+            with: Some(7),
+            ..HistoryFilter::default()
+        };
+        assert_eq!(search_history(history.clone(), &with, 10).1, 1);
+        let asked = HistoryFilter {
+            requests: true,
+            since: Some(at(20, 0)),
+            ..HistoryFilter::default()
+        };
+        assert_eq!(search_history(history, &asked, 10).1, 1);
+        assert!(HistoryFilter::default().is_empty());
+    }
+
+    #[test]
     fn nothing_played_is_fine() {
-        let stats = compute(&[], Range::AllTime, now());
+        let stats = compute(&[], Range::AllTime, now(), &GenreMap::new());
         assert_eq!(stats.plays, 0);
         assert_eq!(stats.bars.len(), 1);
         assert!(stats.peak_hour.is_none());

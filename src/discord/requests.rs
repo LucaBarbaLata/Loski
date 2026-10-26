@@ -1,6 +1,6 @@
-//! Song requests: anyone in the server can `/request` a song, and you pick
-//! Play next, Add to queue or Decline on the card it makes. You stay the
-//! only one who controls Loski.
+//! Song requests: anyone in the server can `/request` a song. Waiting
+//! requests gather on one card, where you (or a co-DJ) play them next, add
+//! them to the queue or decline them. A co-DJ's own requests go straight in.
 
 use std::{
     collections::HashMap,
@@ -15,12 +15,17 @@ use twilight_interactions::command::{
 use twilight_model::{
     application::command::CommandOptionChoice,
     channel::message::{Component, component::ButtonStyle},
+    id::{
+        Id,
+        marker::{ChannelMarker, MessageMarker},
+    },
 };
 
 use super::{
     App, SHORT_SECS,
     cards::{self, Btn, color},
     commands::{self, Placement},
+    friends::Access,
     icons::{Icon, Icons},
     interact::Ix,
     oops,
@@ -32,12 +37,16 @@ use crate::{
     util::{escape_md, fmt_ms, truncate},
 };
 
-/// How long a request card can still be answered.
+/// How long a request waits for an answer.
 const TTL: Duration = Duration::from_secs(30 * 60);
 /// Time between two requests from the same person.
 const COOLDOWN: Duration = Duration::from_secs(20);
 /// Unanswered requests one person can have at once.
 const MAX_OPEN: usize = 5;
+/// Requests listed on the card with their covers; the rest are in its menu.
+const SHOWN: usize = 6;
+/// What a select menu holds.
+const MENU_MAX: usize = 25;
 
 #[derive(CommandModel, CreateCommand)]
 #[command(
@@ -56,24 +65,48 @@ pub struct RequestComplete {
     song: AutocompleteValue<String>,
 }
 
-struct Request {
-    track: TrackInfo,
-    by: String,
-    by_id: u64,
-    at: Instant,
+/// A song someone asked for.
+pub struct Request {
+    pub nonce: u64,
+    pub track: TrackInfo,
+    pub by: String,
+    pub by_id: u64,
+    /// When it was asked, as a Unix timestamp (for the card).
+    pub asked_at: i64,
+    pub at: Instant,
 }
 
 #[derive(Default)]
 pub struct Requests {
-    open: Mutex<HashMap<u64, Request>>,
-    last: Mutex<HashMap<u64, Instant>>,
+    state: Mutex<State>,
+    /// One card update at a time, so two quick requests don't post two cards.
+    drawing: tokio::sync::Mutex<()>,
 }
 
-impl Requests {
-    fn take(&self, nonce: u64) -> Option<Request> {
-        let mut open = self.open.lock();
-        open.retain(|_, r| r.at.elapsed() < TTL);
-        open.remove(&nonce)
+#[derive(Default)]
+struct State {
+    open: Vec<Request>,
+    last: HashMap<u64, Instant>,
+    /// The card listing them.
+    card: Option<(Id<ChannelMarker>, Id<MessageMarker>)>,
+    /// The request picked in the card's menu.
+    picked: Option<u64>,
+}
+
+impl State {
+    fn tidy(&mut self) {
+        self.open.retain(|r| r.at.elapsed() < TTL);
+        if self
+            .picked
+            .is_some_and(|n| !self.open.iter().any(|r| r.nonce == n))
+        {
+            self.picked = None;
+        }
+    }
+
+    fn take(&mut self, nonce: u64) -> Option<Request> {
+        let index = self.open.iter().position(|r| r.nonce == nonce)?;
+        Some(self.open.remove(index))
     }
 }
 
@@ -83,7 +116,7 @@ pub async fn suggestions(app: &App, input: CommandInputData<'_>) -> Vec<CommandO
     match RequestComplete::from_interaction(input) {
         Ok(RequestComplete {
             song: AutocompleteValue::Focused(partial),
-        }) if !partial.trim().is_empty() => commands::song_suggestions(app, &partial).await,
+        }) if !partial.trim().is_empty() => commands::song_suggestions(app, &partial, false).await,
         _ => Vec::new(),
     }
 }
@@ -112,21 +145,29 @@ async fn find_song(app: &App, song: &str) -> Result<TrackInfo> {
 
 pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
     let app = &ix.app;
+    if ix.access() >= Access::Queue {
+        // You and co-DJs don't need to ask.
+        let target = commands::require_voice(ix)?;
+        ix.defer().await?;
+        let track = find_song(app, &cmd.song).await?;
+        let core = app.core()?;
+        let card =
+            commands::enqueue(app, &core, target, vec![track], Placement::End, None, None).await?;
+        return ix.reply_temp(vec![card], SHORT_SECS).await;
+    }
+    if app.prefs().requests_off {
+        return Err(oops("Song requests are off right now."));
+    }
     let by_id = ix.user_id.map_or(0, |u| u.get());
     {
-        let requests = &app.requests;
-        let open = requests
-            .open
-            .lock()
-            .values()
-            .filter(|r| r.by_id == by_id && r.at.elapsed() < TTL)
-            .count();
-        if open >= MAX_OPEN {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        if st.open.iter().filter(|r| r.by_id == by_id).count() >= MAX_OPEN {
             return Err(oops(
                 "You have a few requests waiting already. Give them a moment.",
             ));
         }
-        if let Some(at) = requests.last.lock().get(&by_id)
+        if let Some(at) = st.last.get(&by_id)
             && at.elapsed() < COOLDOWN
         {
             return Err(oops("One at a time. Try again in a few seconds."));
@@ -134,118 +175,303 @@ pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
     }
     ix.defer().await?;
     let track = find_song(app, &cmd.song).await?;
-    let nonce = ix.id.get();
-    let by = ix.user_name.clone();
-    let card = request_card(&app.icons, &track, &by, nonce);
-    app.requests.last.lock().insert(by_id, Instant::now());
-    app.requests.open.lock().insert(
-        nonce,
-        Request {
-            track,
-            by,
-            by_id,
-            at: Instant::now(),
-        },
+    let text = format!(
+        "Asked for **{}** by {}. It's on the requests card now.",
+        escape_md(&truncate(&track.title, 80)),
+        escape_md(&truncate(&track.artists_joined(), 60))
     );
-    ix.reply(vec![card]).await
+    let cover = track.cover_thumb_url.clone();
+    {
+        let mut st = app.requests.state.lock();
+        st.last.insert(by_id, Instant::now());
+        st.open.push(Request {
+            nonce: ix.id.get(),
+            track,
+            by: ix.user_name.clone(),
+            by_id,
+            asked_at: now_unix(),
+            at: Instant::now(),
+        });
+    }
+    let card = cards::toast(&app.icons, &text, cover.as_deref(), color::SUCCESS);
+    ix.reply_temp(vec![card], SHORT_SECS).await?;
+    redraw(app, ix.channel_id).await;
+    Ok(())
 }
 
-pub fn request_card(icons: &Icons, track: &TrackInfo, by: &str, nonce: u64) -> Component {
-    let expires = now_unix() + TTL.as_secs() as i64;
-    let text = format!(
-        "-# SONG REQUEST\n**{}** would like to hear\n### [{}]({})\n{} · `{}`",
-        escape_md(&truncate(by, 40)),
-        escape_md(&truncate(&track.title, 80)),
-        track.url(),
-        escape_md(&truncate(&track.artists_joined(), 80)),
-        fmt_ms(track.duration_ms as u64)
-    );
-    cards::card(
-        Some(color::BRAND),
-        vec![
-            cards::text_with_cover(text, track.cover_thumb_url.as_deref()),
-            cards::row(vec![
-                Btn::icon(&format!("req:{nonce}:next"), Icon::PlayNext)
+/// Every waiting request on one card. `picked` shows that one's buttons.
+pub fn requests_card(icons: &Icons, open: &[Request], picked: Option<u64>) -> Component {
+    let waiting = match open.len() {
+        1 => "1 WAITING".to_string(),
+        n => format!("{n} WAITING"),
+    };
+    let mut parts = vec![cards::text(format!("-# SONG REQUESTS · {waiting}"))];
+    for request in open.iter().take(SHOWN) {
+        let track = &request.track;
+        parts.push(cards::text_with_cover(
+            format!(
+                "[**{}**]({}) · {} · `{}`\n-# from **{}** <t:{}:R>",
+                escape_md(&truncate(&track.title, 70)),
+                track.url(),
+                escape_md(&truncate(&track.artists_joined(), 50)),
+                fmt_ms(track.duration_ms as u64),
+                escape_md(&truncate(&request.by, 32)),
+                request.asked_at
+            ),
+            track.cover_thumb_url.as_deref(),
+        ));
+    }
+    if open.len() > SHOWN {
+        parts.push(cards::text(format!(
+            "-# and {} more in the menu",
+            open.len() - SHOWN
+        )));
+    }
+    let options = open
+        .iter()
+        .take(MENU_MAX)
+        .map(|r| {
+            let mut option = cards::option(
+                truncate(
+                    &format!("{} — {}", r.track.title, r.track.artists_joined()),
+                    100,
+                ),
+                r.nonce.to_string(),
+                Some(truncate(&format!("from {}", r.by), 100)),
+                None,
+            );
+            option.default = picked == Some(r.nonce);
+            option
+        })
+        .collect();
+    parts.push(cards::row(vec![cards::select(
+        "req:pick",
+        "Pick a request",
+        false,
+        options,
+    )]));
+
+    match picked.and_then(|n| open.iter().find(|r| r.nonce == n)) {
+        Some(request) => {
+            let nonce = request.nonce;
+            parts.push(cards::text(format!(
+                "-# PICKED\n**{}** from **{}**",
+                escape_md(&truncate(&request.track.title, 70)),
+                escape_md(&truncate(&request.by, 32))
+            )));
+            parts.push(cards::row(vec![
+                Btn::icon(&format!("req:one:{nonce}:next"), Icon::PlayNext)
                     .with_label("Play next")
                     .style(ButtonStyle::Success)
                     .build(icons),
-                Btn::icon(&format!("req:{nonce}:end"), Icon::Add)
+                Btn::icon(&format!("req:one:{nonce}:end"), Icon::Add)
                     .with_label("Add to queue")
                     .build(icons),
-                Btn::label(&format!("req:{nonce}:no"), "Decline")
+                Btn::label(&format!("req:one:{nonce}:no"), "Decline")
                     .style(ButtonStyle::Danger)
                     .build(icons),
-            ]),
-            cards::text(format!(
-                "-# Only the owner can answer · expires <t:{expires}:R>"
-            )),
-        ],
-    )
+                Btn::label("req:back", "Back").build(icons),
+            ]));
+        }
+        None => parts.push(cards::row(vec![
+            Btn::icon("req:all:next", Icon::PlayNext)
+                .with_label(if open.len() == 1 {
+                    "Play next"
+                } else {
+                    "Play all next"
+                })
+                .style(ButtonStyle::Success)
+                .build(icons),
+            Btn::icon("req:all:end", Icon::Add)
+                .with_label(if open.len() == 1 {
+                    "Add to queue"
+                } else {
+                    "Add all to the end"
+                })
+                .build(icons),
+            Btn::label(
+                "req:all:no",
+                if open.len() == 1 {
+                    "Decline"
+                } else {
+                    "Decline all"
+                },
+            )
+            .style(ButtonStyle::Danger)
+            .build(icons),
+        ])),
+    }
+    parts.push(cards::text(
+        "-# You and co-DJs can answer · requests expire after 30 minutes",
+    ));
+    cards::card(Some(color::BRAND), parts)
 }
 
-/// Play next / Add to queue / Decline on a request card (owner only; the
-/// component handler has already checked).
-pub async fn answer(ix: &Ix, rest: &str) -> Result<()> {
+/// Puts the requests card up to date: edited where it is, posted if it
+/// isn't up (in the panel's channel, or where the request came from), and
+/// removed once nothing's waiting.
+async fn redraw(app: &App, fallback: Option<Id<ChannelMarker>>) {
+    let _drawing = app.requests.drawing.lock().await;
+    let (card, existing) = {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        let card = (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked));
+        (card, st.card)
+    };
+    let Some(card) = card else {
+        let old = app.requests.state.lock().card.take();
+        if let Some((channel, message)) = old {
+            let _ = app.http.delete_message(channel, message).await;
+        }
+        return;
+    };
+    let components = [card];
+    if let Some((channel, message)) = existing {
+        let edited = app
+            .http
+            .update_message(channel, message)
+            .flags(cards::V2)
+            .components(Some(&components))
+            .await;
+        if edited.is_ok() {
+            return;
+        }
+    }
+    let Some(channel) = app.ui.home().or(fallback) else {
+        return;
+    };
+    let posted = app
+        .http
+        .create_message(channel)
+        .flags(cards::V2)
+        .components(&components)
+        .await;
+    match posted {
+        Ok(response) => {
+            if let Ok(message) = response.model().await {
+                app.requests.state.lock().card = Some((channel, message.id));
+            }
+        }
+        Err(e) => tracing::warn!("could not post the requests card: {e}"),
+    }
+}
+
+/// A menu or button on the requests card (the component handler has
+/// checked it's you or a co-DJ). `rest` is what follows `req:`.
+pub async fn answer(ix: &Ix, rest: &str, value: Option<&str>) -> Result<()> {
     let app = &ix.app;
-    let (nonce, how) = rest.split_once(':').unwrap_or((rest, "no"));
-    let Some(request) = app.requests.take(nonce.parse().unwrap_or_default()) else {
-        ix.update_message(vec![cards::info(
-            &app.icons,
-            "This request expired. Ask for it again with `/request`.",
-        )])
-        .await?;
-        ix.delete_later(SHORT_SECS);
-        return Ok(());
+    let mut parts = rest.split(':');
+    let (what, how) = match (parts.next(), parts.next(), parts.next()) {
+        (Some("pick"), _, _) => {
+            app.requests.state.lock().picked = value.and_then(|v| v.parse().ok());
+            return redraw_here(ix).await;
+        }
+        (Some("back"), _, _) => {
+            app.requests.state.lock().picked = None;
+            return redraw_here(ix).await;
+        }
+        (Some("one"), Some(nonce), Some(how)) => (nonce.parse::<u64>().ok(), how),
+        (Some("all"), Some(how), _) => (None, how),
+        _ => return ix.ack().await,
     };
     let placement = match how {
-        "next" => Placement::Next,
-        "end" => Placement::End,
-        _ => {
-            let text = format!(
-                "Not this time, {}. (**{}**)",
-                escape_md(&request.by),
-                escape_md(&request.track.title)
-            );
-            ix.update_message(vec![cards::info(&app.icons, &text)])
-                .await?;
-            ix.delete_later(SHORT_SECS);
-            return Ok(());
-        }
+        "next" => Some(Placement::Next),
+        "end" => Some(Placement::End),
+        _ => None,
     };
-
-    let core = app.core()?;
-    let guild = match commands::require_voice(ix) {
-        Ok(guild) => guild,
-        Err(e) => {
-            // Keep the request for when you're in voice.
-            app.requests.open.lock().insert(
-                nonce.parse().unwrap_or_default(),
-                Request {
-                    at: Instant::now(),
-                    ..request
-                },
-            );
-            return Err(e);
+    // Before taking the requests, so they stay if you aren't in voice.
+    let target = match placement {
+        Some(_) => Some(commands::require_voice(ix)?),
+        None => None,
+    };
+    let taken: Vec<Request> = {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        match what {
+            Some(nonce) => st.take(nonce).into_iter().collect(),
+            None => std::mem::take(&mut st.open),
         }
     };
     ix.ack().await?;
-    let from = format!("**{}**'s request", escape_md(&request.by));
-    let card = commands::enqueue(
-        app,
-        &core,
-        guild,
-        vec![request.track],
-        placement,
-        Some(from),
-        None,
-    )
-    .await?;
-    app.http
-        .interaction(app.app_id)
-        .update_response(&ix.token)
-        .flags(cards::V2)
-        .components(Some(&[card]))
-        .await?;
-    ix.delete_later(SHORT_SECS);
-    Ok(())
+    if taken.is_empty() {
+        redraw_after(ix).await;
+        let card = cards::info(&app.icons, "That request was answered already, or expired.");
+        return ix.followup_temp(vec![card], SHORT_SECS).await;
+    }
+
+    let outcome = match (placement, target) {
+        (Some(placement), Some(target)) => {
+            let core = app.core()?;
+            let source = match taken.as_slice() {
+                [one] => format!("**{}**'s request", escape_md(&one.by)),
+                _ => "the requests".to_string(),
+            };
+            let tracks = taken
+                .into_iter()
+                .map(|r| TrackInfo {
+                    from: Some(format!("**{}**'s request", escape_md(&r.by)).into()),
+                    requested_by: Some(r.by_id),
+                    ..r.track
+                })
+                .collect();
+            commands::enqueue(app, &core, target, tracks, placement, Some(source), None).await
+        }
+        _ => {
+            let text = match taken.as_slice() {
+                [one] => format!(
+                    "Not this time, {}. (**{}**)",
+                    escape_md(&one.by),
+                    escape_md(&one.track.title)
+                ),
+                many => format!("Declined {} requests.", many.len()),
+            };
+            Ok(cards::info(&app.icons, &text))
+        }
+    };
+    redraw_after(ix).await;
+    ix.followup_temp(vec![outcome?], SHORT_SECS).await
+}
+
+/// The card the menu was on, redrawn in place (or removed when empty).
+async fn redraw_here(ix: &Ix) -> Result<()> {
+    let app = &ix.app;
+    let card = {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked))
+    };
+    match card {
+        Some(card) => ix.update_message(vec![card]).await,
+        None => {
+            ix.ack().await?;
+            ix.delete_reply().await;
+            app.requests.state.lock().card = None;
+            Ok(())
+        }
+    }
+}
+
+/// After an answer (already acknowledged): the card shows what's left.
+async fn redraw_after(ix: &Ix) {
+    let app = &ix.app;
+    let card = {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked))
+    };
+    match card {
+        Some(card) => {
+            let _ = app
+                .http
+                .interaction(app.app_id)
+                .update_response(&ix.token)
+                .flags(cards::V2)
+                .components(Some(&[card]))
+                .await;
+        }
+        None => {
+            ix.delete_reply().await;
+            app.requests.state.lock().card = None;
+        }
+    }
 }

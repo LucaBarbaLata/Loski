@@ -84,6 +84,7 @@ fn song(n: u8, album: &str) -> TrackInfo {
         explicit: false,
         year: None,
         from: None,
+        requested_by: None,
     }
 }
 
@@ -147,6 +148,8 @@ impl Harness {
             deck_events,
             listen: None,
             played: Vec::new(),
+            connect_up_next: Vec::new(),
+            audience: Vec::new(),
         };
         Self {
             engine: Engine {

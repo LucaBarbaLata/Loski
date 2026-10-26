@@ -16,12 +16,15 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{ChannelMarker, GuildMarker, InteractionMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, InteractionMarker, RoleMarker, UserMarker},
     },
 };
 use twilight_util::builder::InteractionResponseDataBuilder;
 
-use super::{App, Oops, cards};
+use super::{
+    App, Oops, cards,
+    friends::{self, Access},
+};
 use crate::personality;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,8 @@ pub struct Ix {
     pub user_id: Option<Id<UserMarker>>,
     /// What the server calls whoever this is (nickname, display name or username).
     pub user_name: String,
+    /// Their roles in this server, for the DJ role.
+    roles: Vec<Id<RoleMarker>>,
     /// A button or menu: its "reply" is the message it sits on.
     from_component: bool,
     state: Mutex<State>,
@@ -55,6 +60,11 @@ impl Ix {
             channel_id: interaction.channel.as_ref().map(|c| c.id),
             user_id: interaction.author_id(),
             user_name: display_name(interaction),
+            roles: interaction
+                .member
+                .as_ref()
+                .map(|m| m.roles.clone())
+                .unwrap_or_default(),
             // A form opened from a button belongs to that button's message too.
             from_component: interaction.kind == InteractionType::MessageComponent
                 || (interaction.kind == InteractionType::ModalSubmit
@@ -63,9 +73,28 @@ impl Ix {
         }
     }
 
+    /// A button, menu or a form opened from one (as opposed to a command).
+    pub fn is_component(&self) -> bool {
+        self.from_component
+    }
+
     pub fn is_owner(&self) -> bool {
-        self.user_id
-            .is_some_and(|u| u.get() == self.app.cfg.owner_id)
+        self.user_id.is_some_and(|u| u == self.app.owner_id())
+    }
+
+    /// What this person may do: everything for you, what you allowed for a
+    /// co-DJ, listening along for everyone else.
+    pub fn access(&self) -> Access {
+        if self.is_owner() {
+            return Access::Owner;
+        }
+        let prefs = self.app.prefs();
+        match self.user_id {
+            Some(user) if friends::is_co_dj(&prefs, user.get(), &self.roles) => {
+                friends::co_dj_access(&prefs)
+            }
+            _ => Access::Listener,
+        }
     }
 
     fn client(&self) -> InteractionClient<'_> {
@@ -272,12 +301,18 @@ impl Ix {
         }
     }
 
-    /// The polite refusal for anyone who isn't the owner.
+    /// The polite refusal for something this person may not do.
     pub async fn refuse(&self) -> Result<()> {
-        let text = format!(
-            "{}\n-# You can still suggest a song with `/request`.",
-            personality::not_owner()
-        );
+        let text = match self.access() {
+            Access::Queue => {
+                "As a co-DJ you can add songs and look at the queue. The rest stays with whoever runs me.".to_string()
+            }
+            Access::Full => "That one stays with whoever runs me.".to_string(),
+            _ => format!(
+                "{}\n-# You can still suggest a song with `/request`, like songs and vote to skip.",
+                personality::not_owner()
+            ),
+        };
         let card = cards::card(None, vec![cards::text(text)]);
         self.reply_private(vec![card]).await
     }
