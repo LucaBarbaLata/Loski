@@ -5,9 +5,12 @@ services:
     image: ghcr.io/lucabarbalata/loski:latest
     build: .
     container_name: loski
-    # loski.sh runs Loski as you on Linux, so the data folder stays yours.
-    user: "${LOSKI_UID:-10001}:${LOSKI_GID:-10001}"
     env_file: .env
+    environment:
+      # Who ./data belongs to: you when loski.sh starts Loski on Linux, Loski's
+      # own user (10001) otherwise. Loski sorts the folder out as it starts.
+      LOSKI_UID: ${LOSKI_UID:-10001}
+      LOSKI_GID: ${LOSKI_GID:-10001}
     volumes:
       - ./data:/data
     ports:

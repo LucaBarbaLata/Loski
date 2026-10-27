@@ -638,3 +638,24 @@ fn lyrics_cards_are_valid() {
     }
     assert_valid(page_card(&icons, &song, &instrumental, 0));
 }
+
+#[test]
+fn login_card_is_valid() {
+    use super::login::{AGAIN, FIRST, login_card};
+    let link = |n: u8| {
+        format!(
+            "https://accounts.spotify.com/authorize?client_id={}&state=x{n}",
+            "a".repeat(300)
+        )
+    };
+    for links in [
+        (Some(link(1)), Some(link(2))),
+        (None, Some(link(2))),
+        (Some(link(1)), None),
+        (None, None),
+    ] {
+        for intro in [FIRST, AGAIN] {
+            assert_valid(login_card(intro, "http://127.0.0.1:5588/", &links));
+        }
+    }
+}

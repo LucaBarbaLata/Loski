@@ -4,6 +4,12 @@
 //! 1. librespot, with Spotify's own client ID (needed to stream audio).
 //! 2. Your developer app (used for search and follow mode).
 //!
+//! Spotify sends the browser back to 127.0.0.1, so the callback server here
+//! only hears it when the browser runs on the same computer as Loski. From
+//! anywhere else (Loski on a server, say), the page Spotify sends you back to
+//! doesn't load, and you paste its address to Loski in Discord instead: it
+//! carries the same code, which ends up in `Login::finish` either way.
+//!
 //! The callback server listens on all interfaces because inside Docker the
 //! browser's request arrives through a port mapping, not on loopback.
 
@@ -17,6 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::{mpsc, oneshot},
 };
 use url::Url;
 
@@ -59,141 +66,271 @@ pub struct LoginResult {
     pub web_token: Option<WebToken>,
 }
 
-/// Runs the login pages until every requested login has finished.
-pub async fn login(
-    cfg: &Config,
-    http: &reqwest::Client,
-    need_librespot: bool,
-    need_web: bool,
-) -> Result<LoginResult> {
-    let web_listener = TcpListener::bind(("0.0.0.0", cfg.auth_port))
-        .await
-        .with_context(|| format!("could not open login port {}", cfg.auth_port))?;
-    let librespot_listener = TcpListener::bind(("0.0.0.0", LIBRESPOT_AUTH_PORT))
-        .await
-        .with_context(|| format!("could not open login port {LIBRESPOT_AUTH_PORT}"))?;
+/// The address Spotify sent the browser back to, pasted in Discord because
+/// the browser wasn't on Loski's computer, and where to say how it went.
+pub struct Pasted {
+    pub text: String,
+    /// What to tell you: how far the login got, or what was wrong.
+    pub reply: oneshot::Sender<Result<String, String>>,
+}
 
-    let verifier: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(96)
-        .map(char::from)
-        .collect();
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let state: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(24)
-        .map(char::from)
-        .collect();
-
-    let librespot_auth_url = Url::parse_with_params(
-        "https://accounts.spotify.com/authorize",
-        &[
-            ("response_type", "code"),
-            ("client_id", KEYMASTER_CLIENT_ID),
-            ("redirect_uri", &librespot_redirect_uri()),
-            ("scope", LIBRESPOT_SCOPES),
-            ("code_challenge_method", "S256"),
-            ("code_challenge", &challenge),
-            ("state", &state),
-        ],
-    )?;
-    let web_auth_url = Url::parse_with_params(
-        "https://accounts.spotify.com/authorize",
-        &[
-            ("response_type", "code"),
-            ("client_id", cfg.spotify_client_id.as_str()),
-            ("redirect_uri", &cfg.web_redirect_uri()),
-            ("scope", WEB_SCOPES),
-            ("state", &state),
-        ],
-    )?;
-    let next_urls = NextUrls {
-        librespot: need_librespot.then_some(librespot_auth_url),
-        web: need_web.then_some(web_auth_url),
+/// The code and its check from a pasted address, and which login it ends:
+/// `/login` for streaming, `/callback` for search.
+fn read_pasted(text: &str) -> Option<(String, HashMap<String, String>)> {
+    let word = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c| matches!(c, '<' | '>' | '`' | '"' | '\'')))
+        .find(|w| w.contains("code=") || w.contains("error="))?;
+    let address = if word.contains("://") {
+        word.to_string()
+    } else if word.starts_with('/') {
+        // Just the end of it, like "/login?code=…".
+        format!("http://127.0.0.1{word}")
+    } else {
+        // Without the "http://" a browser hides, like "127.0.0.1:5588/callback?code=…".
+        format!("http://{word}")
     };
+    let url = Url::parse(&address).ok()?;
+    Some((
+        url.path().to_string(),
+        url.query_pairs().into_owned().collect(),
+    ))
+}
 
-    let mut result = LoginResult {
-        librespot_token: None,
-        web_token: None,
-    };
-    let done = |r: &LoginResult| {
-        (!need_librespot || r.librespot_token.is_some()) && (!need_web || r.web_token.is_some())
-    };
+/// One Spotify login: the approval pages to open, and what it takes to
+/// finish them.
+pub struct Login {
+    verifier: String,
+    state: String,
+    librespot_url: Option<Url>,
+    web_url: Option<Url>,
+}
 
-    loop {
-        let stream = tokio::select! {
-            accepted = web_listener.accept() => accepted?.0,
-            accepted = librespot_listener.accept() => accepted?.0,
+impl Login {
+    /// Prepares the logins still needed (streaming, search or both).
+    pub fn new(cfg: &Config, need_librespot: bool, need_web: bool) -> Result<Self> {
+        let verifier: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(96)
+            .map(char::from)
+            .collect();
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let state: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(24)
+            .map(char::from)
+            .collect();
+        let librespot_url = Url::parse_with_params(
+            "https://accounts.spotify.com/authorize",
+            &[
+                ("response_type", "code"),
+                ("client_id", KEYMASTER_CLIENT_ID),
+                ("redirect_uri", &librespot_redirect_uri()),
+                ("scope", LIBRESPOT_SCOPES),
+                ("code_challenge_method", "S256"),
+                ("code_challenge", &challenge),
+                ("state", &state),
+            ],
+        )?;
+        let web_url = Url::parse_with_params(
+            "https://accounts.spotify.com/authorize",
+            &[
+                ("response_type", "code"),
+                ("client_id", cfg.spotify_client_id.as_str()),
+                ("redirect_uri", &cfg.web_redirect_uri()),
+                ("scope", WEB_SCOPES),
+                ("state", &state),
+            ],
+        )?;
+        Ok(Self {
+            verifier,
+            state,
+            librespot_url: need_librespot.then_some(librespot_url),
+            web_url: need_web.then_some(web_url),
+        })
+    }
+
+    /// The approval pages, streaming first, for a browser anywhere.
+    pub fn links(&self) -> (Option<String>, Option<String>) {
+        (
+            self.librespot_url.as_ref().map(Url::to_string),
+            self.web_url.as_ref().map(Url::to_string),
+        )
+    }
+
+    /// The streaming login's code, swapped for its token.
+    async fn streaming(&self, http: &reqwest::Client, code: &str) -> Result<String> {
+        exchange_librespot_code(http, code, &self.verifier).await
+    }
+
+    /// What a pasted address does: finishes one of the logins, or says why not.
+    async fn paste(
+        &self,
+        cfg: &Config,
+        http: &reqwest::Client,
+        text: &str,
+        result: &mut LoginResult,
+    ) -> Result<String, String> {
+        let Some((path, query)) = read_pasted(text) else {
+            return Err("That doesn't look like the address from the login. It starts with `http://127.0.0.1` and has `code=` in it.".into());
         };
-        let Some((mut stream, path, query)) = read_request(stream).await else {
-            continue;
-        };
-
-        if query.get("state").is_some_and(|s| s != &state) {
-            respond_html(
-                &mut stream,
-                400,
-                &page(
-                    "That login link is stale",
-                    "Open the login page again and start over.",
-                    Some(&cfg.login_url()),
-                ),
-            )
-            .await;
-            continue;
+        if query.get("state") != Some(&self.state) {
+            return Err(
+                "That address is from an older login. Use the buttons in my latest message.".into(),
+            );
         }
         if let Some(error) = query.get("error") {
-            respond_html(
-                &mut stream,
-                400,
-                &page(
-                    "Login was cancelled",
-                    &format!("Spotify said: {error}. You can try again."),
-                    Some(&cfg.login_url()),
-                ),
-            )
-            .await;
-            continue;
+            return Err(format!("Spotify said: {error}. Press the button again."));
         }
-
+        let code = query.get("code").map(String::as_str).unwrap_or_default();
         match path.as_str() {
-            "/login" => match query.get("code") {
-                Some(code) => match exchange_librespot_code(http, code, &verifier).await {
-                    Ok(token) => {
-                        result.librespot_token = Some(token);
-                        continue_login(&mut stream, &result, &next_urls).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("librespot login failed: {e:#}");
-                        respond_html(
-                            &mut stream,
-                            500,
-                            &page("Login failed", &format!("{e}"), Some(&cfg.login_url())),
-                        )
-                        .await;
-                    }
-                },
-                None => redirect(&mut stream, &cfg.login_url()).await,
-            },
-            "/callback" => match query.get("code") {
-                Some(code) => match exchange_web_code(cfg, http, code).await {
-                    Ok(token) => {
-                        result.web_token = Some(token);
-                        continue_login(&mut stream, &result, &next_urls).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Web API login failed: {e:#}");
-                        respond_html(&mut stream, 500, &page("Login failed", &format!("{e}. Check SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET and that the redirect URI in your Spotify app is exactly {}", cfg.web_redirect_uri()), Some(&cfg.login_url()))).await;
-                    }
-                },
-                None => redirect(&mut stream, &cfg.login_url()).await,
-            },
-            "/" => continue_login(&mut stream, &result, &next_urls).await,
-            _ => respond_html(&mut stream, 404, "").await,
+            "/login" if self.librespot_url.is_some() => {
+                let token = self.streaming(http, code).await.map_err(|e| {
+                    tracing::error!("librespot login failed: {e:#}");
+                    format!("Spotify didn't take it: {e}. Press the button again.")
+                })?;
+                result.librespot_token = Some(token);
+            }
+            "/callback" if self.web_url.is_some() => {
+                let token = exchange_web_code(cfg, http, code).await.map_err(|e| {
+                    tracing::error!("Web API login failed: {e:#}");
+                    format!("Spotify didn't take it: {e}. Press the button again.")
+                })?;
+                result.web_token = Some(token);
+            }
+            _ => {
+                return Err(
+                    "That's an address I wasn't waiting for. Use the buttons in my latest message."
+                        .into(),
+                );
+            }
         }
+        Ok(if self.done(result) {
+            "**Spotify is connected.** Give me a moment to start, then `/play` away.".into()
+        } else if result.librespot_token.is_some() {
+            "Streaming is set up (1 of 2). Now the second button: search and follow.".into()
+        } else {
+            "Search is set up (1 of 2). Now the first button: streaming.".into()
+        })
+    }
 
-        if done(&result) {
-            return Ok(result);
+    fn done(&self, r: &LoginResult) -> bool {
+        (self.librespot_url.is_none() || r.librespot_token.is_some())
+            && (self.web_url.is_none() || r.web_token.is_some())
+    }
+
+    /// Waits until every login has finished: through the login page on this
+    /// computer, or addresses pasted in Discord.
+    pub async fn finish(
+        &self,
+        cfg: &Config,
+        http: &reqwest::Client,
+        pasted: &mut mpsc::UnboundedReceiver<Pasted>,
+    ) -> Result<LoginResult> {
+        let web_listener = TcpListener::bind(("0.0.0.0", cfg.auth_port))
+            .await
+            .with_context(|| format!("could not open login port {}", cfg.auth_port))?;
+        let librespot_listener = TcpListener::bind(("0.0.0.0", LIBRESPOT_AUTH_PORT))
+            .await
+            .with_context(|| format!("could not open login port {LIBRESPOT_AUTH_PORT}"))?;
+        let next_urls = NextUrls {
+            librespot: self.librespot_url.clone(),
+            web: self.web_url.clone(),
+        };
+        let mut result = LoginResult {
+            librespot_token: None,
+            web_token: None,
+        };
+        let mut pasting = true;
+
+        loop {
+            let stream = tokio::select! {
+                accepted = web_listener.accept() => accepted?.0,
+                accepted = librespot_listener.accept() => accepted?.0,
+                paste = pasted.recv(), if pasting => {
+                    match paste {
+                        Some(paste) => {
+                            let reply = self.paste(cfg, http, &paste.text, &mut result).await;
+                            let _ = paste.reply.send(reply);
+                            if self.done(&result) {
+                                return Ok(result);
+                            }
+                        }
+                        None => pasting = false,
+                    }
+                    continue;
+                }
+            };
+            let Some((mut stream, path, query)) = read_request(stream).await else {
+                continue;
+            };
+
+            if query.get("state").is_some_and(|s| s != &self.state) {
+                respond_html(
+                    &mut stream,
+                    400,
+                    &page(
+                        "That login link is stale",
+                        "Open the login page again and start over.",
+                        Some(&cfg.login_url()),
+                    ),
+                )
+                .await;
+                continue;
+            }
+            if let Some(error) = query.get("error") {
+                respond_html(
+                    &mut stream,
+                    400,
+                    &page(
+                        "Login was cancelled",
+                        &format!("Spotify said: {error}. You can try again."),
+                        Some(&cfg.login_url()),
+                    ),
+                )
+                .await;
+                continue;
+            }
+
+            match path.as_str() {
+                "/login" => match query.get("code") {
+                    Some(code) => match self.streaming(http, code).await {
+                        Ok(token) => {
+                            result.librespot_token = Some(token);
+                            continue_login(&mut stream, &result, &next_urls).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("librespot login failed: {e:#}");
+                            respond_html(
+                                &mut stream,
+                                500,
+                                &page("Login failed", &format!("{e}"), Some(&cfg.login_url())),
+                            )
+                            .await;
+                        }
+                    },
+                    None => redirect(&mut stream, &cfg.login_url()).await,
+                },
+                "/callback" => match query.get("code") {
+                    Some(code) => match exchange_web_code(cfg, http, code).await {
+                        Ok(token) => {
+                            result.web_token = Some(token);
+                            continue_login(&mut stream, &result, &next_urls).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Web API login failed: {e:#}");
+                            respond_html(&mut stream, 500, &page("Login failed", &format!("{e}. Check SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET and that the redirect URI in your Spotify app is exactly {}", cfg.web_redirect_uri()), Some(&cfg.login_url()))).await;
+                        }
+                    },
+                    None => redirect(&mut stream, &cfg.login_url()).await,
+                },
+                "/" => continue_login(&mut stream, &result, &next_urls).await,
+                _ => respond_html(&mut stream, 404, "").await,
+            }
+
+            if self.done(&result) {
+                return Ok(result);
+            }
         }
     }
 }
@@ -369,4 +506,30 @@ main{{max-width:28rem;padding:2rem;text-align:center}}
         escape(title),
         escape(message)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_address_you_paste() {
+        let (path, query) =
+            read_pasted("here: <http://127.0.0.1:8898/login?code=AQB-x_9&state=Zx12> thanks")
+                .unwrap();
+        assert_eq!(path, "/login");
+        assert_eq!(query["code"], "AQB-x_9");
+        assert_eq!(query["state"], "Zx12");
+        let (path, query) = read_pasted("127.0.0.1:5588/callback?code=abc&state=s").unwrap();
+        assert_eq!(
+            (path.as_str(), query["code"].as_str()),
+            ("/callback", "abc")
+        );
+        let (_, query) =
+            read_pasted("http://127.0.0.1:5588/callback?error=access_denied&state=s").unwrap();
+        assert_eq!(query["error"], "access_denied");
+        let (path, _) = read_pasted("/login?code=abc&state=s").unwrap();
+        assert_eq!(path, "/login");
+        assert!(read_pasted("hello there").is_none());
+    }
 }

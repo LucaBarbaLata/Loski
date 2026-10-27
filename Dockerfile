@@ -20,8 +20,9 @@ RUN apt-get update \
     && useradd --system --uid 10001 --home /data loski \
     && mkdir -p /data && chown loski /data
 COPY --from=build /usr/local/bin/loski /usr/local/bin/loski
-USER loski
-ENV DATA_DIR=/data
+# Loski starts as root only to hand /data to its own user (LOSKI_UID, 10001
+# by default), then runs as that user; see src/user.rs.
+ENV DATA_DIR=/data HOME=/data
 VOLUME /data
 # 5588: login page and your Spotify app's callback. 8898: librespot's login callback.
 EXPOSE 5588 8898

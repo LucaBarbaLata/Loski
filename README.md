@@ -84,7 +84,7 @@ Once the keys are saved, the same page shows the rest:
 
 1. **Invite Loski** to your server with the button. It asks for View Channels, Send Messages, Embed Links, Read Message History, Connect, Speak and Set Voice Channel Status (for the song under the channel's name). No privileged intents are needed.
 2. **Make it yours.** Send Loski a direct message saying `claim` and the six-digit code on the page (it's in the log too, and `loski start` prints it). Whoever sends it first becomes the owner, and the code is only on this computer, so nobody else in the server can beat you to it. Setting `OWNER_ID` in `.env` skips this.
-3. **Log in to Spotify**: two quick approvals, one for streaming and one for search. After that you never need to log in again. The login is stored in `./data`.
+3. **Log in to Spotify**: two quick approvals, one for streaming and one for search, from the page or the buttons in the DM Loski sends you. After that you never need to log in again. The login is stored in `./data`.
 
 ### Day to day
 
@@ -114,8 +114,9 @@ chmod +x loski.sh
 ```
 
 - **Docker.** On macOS, `./loski.sh start` opens Docker Desktop if it isn't running. On Linux, install Docker Engine with the Compose plugin ([docs.docker.com/engine/install](https://docs.docker.com/engine/install/)) and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log out and in). The script tells you if either is missing.
-- **Your files stay yours.** On Linux, `loski.sh` runs Loski as your own user, so `data/` belongs to you and backups and restores need no `sudo`. (Running plain `docker compose` instead uses user 10001, which then needs to own `data/`.)
-- **Raspberry Pi.** A Pi 4 or 5 on a 64-bit OS runs the ARM image. The setup and Spotify pages only open on the computer Loski runs on, so on a Pi without a screen either set Loski up on your laptop first and move it with `backup` and `restore`, or reach the pages through SSH: `ssh -L 5588:127.0.0.1:5588 -L 8898:127.0.0.1:8898 pi@raspberrypi`, then open http://127.0.0.1:5588 on the laptop.
+- **Your files stay yours.** On Linux, `loski.sh` has Loski run as your own user, so `data/` belongs to you and backups and restores need no `sudo`. Plain `docker compose up -d` works too; `data/` then belongs to Loski's own user (10001).
+- **Raspberry Pi.** A Pi 4 or 5 on a 64-bit OS runs the ARM image.
+- **On a server, or anywhere without a browser.** The setup page only opens on the computer Loski runs on, so put the three keys in `.env` instead (see `.env.example`), start Loski, and find the claim code in `docker compose logs loski`. For Spotify, press the buttons in the DM Loski sends you, in any browser. Each approval ends on a `127.0.0.1` page that doesn't load, which is expected: copy that page's address and send it to Loski in the same DM. (An SSH tunnel works too: `ssh -L 5588:127.0.0.1:5588 -L 8898:127.0.0.1:8898 you@server`, then open http://127.0.0.1:5588 on your laptop.)
 
 ### Moving to another computer
 

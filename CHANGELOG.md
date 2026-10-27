@@ -7,11 +7,16 @@ What changed in each Loski release. Loski DMs you when a new one is out; `.\losk
 ### Added
 
 - Reorder the queue from the queue card: pick a song, then move it up or down a step at a time (it stays picked), or straight to any position.
+- Log in to Spotify from anywhere, for Loski on a server: the login DM has the two approvals as buttons, and you send Loski the address the browser ends up on. Signing back in to search works the same way.
 
 ### Changed
 
 - The setup page's steps sit tighter, without the gap above each heading.
 - On Windows, `loski start` says when Hyper-V has reserved Loski's login ports, and how to free them.
+
+### Fixed
+
+- Plain `docker compose up -d` on Linux: Loski couldn't write to the `data` folder Docker created, so nothing was saved. Loski now hands the folder to its own user as it starts (to you, when `loski.sh` starts it).
 
 ## 2.0.0 (2026-10-26)
 

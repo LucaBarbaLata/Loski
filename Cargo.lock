@@ -2276,6 +2276,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "image",
+ "libc",
  "librespot-connect",
  "librespot-core",
  "librespot-metadata",

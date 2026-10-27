@@ -6,6 +6,7 @@ mod friends;
 mod icons;
 mod interact;
 mod library;
+mod login;
 mod lyrics;
 mod milestones;
 mod mixes;
@@ -136,6 +137,8 @@ pub struct App {
     /// The latest heartbeat round trip to Discord's gateway.
     pub ping: Mutex<Option<Duration>>,
     pub requests: requests::Requests,
+    /// The Spotify login waiting to finish, for addresses pasted in DMs.
+    pub login: login::Pending,
     /// Who's listening, and their likes and votes for the song playing.
     pub room: friends::Room,
     /// Problems you've been told about and not yet told are fixed.
@@ -324,6 +327,7 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
         started: Instant::now(),
         ping: Mutex::new(None),
         requests: requests::Requests::default(),
+        login: login::Pending::default(),
         room: friends::Room::new(names),
         alerts: Mutex::new(HashSet::new()),
         latest_release: Mutex::new(None),
@@ -439,7 +443,12 @@ async fn handle_event(app: Arc<App>, event: Event) {
             }
         }
         Event::VoiceStateUpdate(update) => voice::on_voice_state(&app, &update.0).await,
-        Event::MessageCreate(message) => claim_by_dm(&app, &message.0).await,
+        Event::MessageCreate(message) => {
+            // A login address from you first; otherwise maybe a claim.
+            if !login::on_paste(&app, &message.0).await {
+                claim_by_dm(&app, &message.0).await;
+            }
+        }
         Event::InteractionCreate(interaction) => {
             let interaction = interaction.0;
             match interaction.kind {
@@ -553,8 +562,12 @@ async fn try_init_core(app: &Arc<App>) -> Result<Arc<Core>> {
     let mut web_token = WebApi::load_token(cfg);
 
     if credentials.is_none() || web_token.is_none() {
+        let login = auth::Login::new(cfg, credentials.is_none(), web_token.is_none())?;
+        let mut pasted = login::start(app, &login);
         ask_owner_to_log_in(app).await;
-        let result = auth::login(cfg, &app.web, credentials.is_none(), web_token.is_none()).await?;
+        let result = login.finish(cfg, &app.web, &mut pasted).await;
+        login::end(app);
+        let result = result?;
         if let Some(token) = result.librespot_token {
             credentials = Some(Credentials::with_access_token(token));
         }
@@ -601,26 +614,10 @@ async fn try_init_core(app: &Arc<App>) -> Result<Arc<Core>> {
 
 async fn ask_owner_to_log_in(app: &App) {
     let url = app.cfg.login_url();
-    tracing::warn!("Spotify login needed. Open {url} in your browser on this computer.");
-    let Ok(dm) = app.http.create_private_channel(app.owner_id()).await else {
-        return;
-    };
-    let Ok(dm) = dm.model().await else { return };
-    let card = cards::card(
-        Some(cards::color::BRAND),
-        vec![cards::text(format!(
-            "### One quick thing before we start\n\
-             I need you to log in to Spotify once so I can stream your music.\n\n\
-             Open **{url}** in your browser on the computer I'm running on. \
-             It's two quick approvals, then you're done for good."
-        ))],
+    tracing::warn!(
+        "Spotify login needed. Open {url} in your browser on this computer, or use the buttons in the DM Loski sent you (from anywhere)."
     );
-    let _ = app
-        .http
-        .create_message(dm.id)
-        .flags(cards::V2)
-        .components(&[card])
-        .await;
+    login::dm(app, login::FIRST).await;
 }
 
 /// While follow mode is on, mirrors what your Spotify is playing.
@@ -711,15 +708,25 @@ async fn web_watchdog(app: Arc<App>, core: Arc<Core>) {
         if !core.spotify.web.is_signed_out() {
             continue;
         }
-        let url = app.cfg.login_url();
-        app.alert(
-            "web-login",
-            &format!(
-                "Spotify signed me out of search and follow mode. Open **{url}** on this computer to sign back in. Playback keeps working meanwhile."
-            ),
-        )
-        .await;
-        match auth::login(&app.cfg, &app.web, false, true).await {
+        let login = match auth::Login::new(&app.cfg, false, true) {
+            Ok(login) => login,
+            Err(e) => {
+                tracing::warn!("couldn't start the Spotify sign-in: {e:#}");
+                continue;
+            }
+        };
+        let mut pasted = login::start(&app, &login);
+        // Once per sign-out, like other problems; the all clear follows.
+        if app.alerts.lock().insert("web-login") {
+            tracing::warn!(
+                "Spotify signed Loski out of search and follow mode. Open {} on this computer, or use the button in Loski's DM.",
+                app.cfg.login_url()
+            );
+            login::dm(&app, login::AGAIN).await;
+        }
+        let finished = login.finish(&app.cfg, &app.web, &mut pasted).await;
+        login::end(&app);
+        match finished {
             Ok(result) => {
                 if let Some(token) = result.web_token {
                     core.spotify.web.replace_token(token).await;

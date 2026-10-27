@@ -52,6 +52,10 @@ ab_glyph = "0.2.32"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10.4"
 
+[target.'cfg(unix)'.dependencies]
+# Switching from root to Loski's own user at start (see src/user.rs).
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

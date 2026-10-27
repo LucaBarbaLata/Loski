@@ -15,15 +15,23 @@ mod spotify;
 mod stats;
 mod store;
 mod track;
+#[cfg(unix)]
+mod user;
 mod util;
 
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let _ = dotenvy::dotenv();
+    // Before any thread starts: in Docker, from root to Loski's own user.
+    #[cfg(unix)]
+    user::become_loski(&setup::data_dir());
     let logs = logging::init();
-    let code = run().await;
+    let code = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the async runtime starts")
+        .block_on(run());
     // Write out whatever the log file still has buffered.
     drop(logs);
     if code != 0 {
