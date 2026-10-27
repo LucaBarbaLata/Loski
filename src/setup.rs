@@ -338,19 +338,6 @@ pub async fn run(dir: &Path, port: u16, claim: Option<&str>) -> Result<()> {
     }
 }
 
-/// The setup page before and after the keys are saved, for the README.
-#[cfg(test)]
-pub fn sample_pages(port: u16, claim: &str) -> (String, String) {
-    let bot = Bot {
-        name: "Loski".into(),
-        app_id: "123456789012345678".into(),
-    };
-    (
-        form(port, None, &HashMap::new()),
-        done(port, &bot, Some(claim)),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

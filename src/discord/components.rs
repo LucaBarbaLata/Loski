@@ -526,10 +526,15 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
         "loski:m:qsave" => save_queue_form(&ix, &text("name")).await,
         "loski:m:recapsave" => recap::save_mix(&ix, &text("name")).await,
         "loski:m:tz" => settings::set_timezone(&ix, &text("tz")).await,
-        id => match id.strip_prefix("loski:m:mixren:") {
-            Some(old) => mixes::rename(&ix, old, &text("name")).await,
-            None => ix.ack().await,
-        },
+        id => {
+            if let Some(old) = id.strip_prefix("loski:m:mixren:") {
+                mixes::rename(&ix, old, &text("name")).await
+            } else if let Some(rest) = id.strip_prefix("loski:m:qmove:") {
+                move_to_form(&ix, rest, &text("to")).await
+            } else {
+                ix.ack().await
+            }
+        }
     };
     if let Err(e) = result {
         ix.fail(e).await;
@@ -637,27 +642,97 @@ async fn queue_action(ix: &Ix, core: &Core, rest: &str) -> Result<()> {
         return ix.ack().await;
     };
     let position: usize = position.parse().unwrap_or(0);
-    let page: usize = page.parse().unwrap_or(0);
+    let mut page: usize = page.parse().unwrap_or(0);
 
     // The queue may have changed since the card was drawn; if so, the
     // refreshed card shows where things are now and nothing else happens.
     let still_there = engine
         .track_at(position)
         .is_some_and(|t| t.base62() == track_id);
+    // A song that moved stays picked, so it can keep moving.
+    let mut selected = None;
     if still_there {
-        match action {
+        let len = engine.queue_view().upcoming.len();
+        let moved_to = match action {
             "play" => {
                 engine.skip_to(position);
+                None
             }
             "top" => {
                 engine.move_track(position, 1);
+                None
             }
             "del" => {
                 engine.remove(position);
+                None
             }
-            _ => {}
+            "up" if position > 1 => Some(position - 1),
+            "down" if position < len => Some(position + 1),
+            "to" => {
+                return ix
+                    .modal(
+                        &format!("loski:m:qmove:{position}:{track_id}"),
+                        "Move this song",
+                        vec![cards::text_field(
+                            "to",
+                            "New position",
+                            Some(&format!("1 plays it next, {len} plays it last")),
+                            "1",
+                            None,
+                            5,
+                        )],
+                    )
+                    .await;
+            }
+            _ => None,
+        };
+        if let Some(to) = moved_to {
+            engine.move_track(position, to);
+            selected = Some(to);
+            page = panel::queue_page_of(to);
         }
     }
-    let card = panel::queue_card(&app.icons, app.ui.color(), &engine.queue_view(), page, None);
+    let card = panel::queue_card(
+        &app.icons,
+        app.ui.color(),
+        &engine.queue_view(),
+        page,
+        selected,
+    );
+    ix.update_message(vec![card]).await
+}
+
+/// "Move to…" on the queue card came back with a position.
+async fn move_to_form(ix: &Ix, rest: &str, input: &str) -> Result<()> {
+    let app = &ix.app;
+    let core = app.core()?;
+    let engine = &core.engine;
+    let (position, track_id) = rest.split_once(':').unwrap_or((rest, ""));
+    let position: usize = position.parse().unwrap_or(0);
+    let len = engine.queue_view().upcoming.len();
+    let to: usize = input
+        .trim()
+        .trim_start_matches('#')
+        .parse()
+        .ok()
+        .filter(|to| (1..=len).contains(to))
+        .ok_or_else(|| oops(format!("Pick a position from 1 to {len}.")))?;
+    let still_there = engine
+        .track_at(position)
+        .is_some_and(|t| t.base62() == track_id);
+    let (page, selected) = if still_there {
+        engine.move_track(position, to);
+        (panel::queue_page_of(to), Some(to))
+    } else {
+        // The queue changed meanwhile; show it as it is now.
+        (panel::queue_page_of(position), None)
+    };
+    let card = panel::queue_card(
+        &app.icons,
+        app.ui.color(),
+        &engine.queue_view(),
+        page,
+        selected,
+    );
     ix.update_message(vec![card]).await
 }

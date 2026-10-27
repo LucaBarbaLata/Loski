@@ -581,6 +581,167 @@ mod tests {
         }
     }
 
+    /// Made-up album art: a two-colour gradient with two soft blobs of light.
+    fn art(seed: usize) -> RgbImage {
+        const PALETTES: [[[f32; 3]; 4]; 5] = [
+            [
+                [16.0, 40.0, 79.0],
+                [240.0, 138.0, 60.0],
+                [255.0, 210.0, 90.0],
+                [255.0, 95.0, 162.0],
+            ],
+            [
+                [58.0, 13.0, 46.0],
+                [176.0, 48.0, 106.0],
+                [255.0, 224.0, 138.0],
+                [120.0, 60.0, 200.0],
+            ],
+            [
+                [37.0, 28.0, 92.0],
+                [123.0, 224.0, 214.0],
+                [58.0, 134.0, 200.0],
+                [240.0, 240.0, 255.0],
+            ],
+            [
+                [59.0, 35.0, 51.0],
+                [242.0, 184.0, 165.0],
+                [255.0, 241.0, 214.0],
+                [181.0, 84.0, 107.0],
+            ],
+            [
+                [31.0, 61.0, 26.0],
+                [232.0, 211.0, 107.0],
+                [106.0, 168.0, 79.0],
+                [255.0, 250.0, 220.0],
+            ],
+        ];
+        let [from, to, glow, spark] = PALETTES[seed % PALETTES.len()];
+        RgbImage::from_fn(640, 640, |x, y| {
+            let (u, v) = (x as f32 / 640.0, y as f32 / 640.0);
+            let t = (u * 0.4 + v * 0.6).clamp(0.0, 1.0);
+            let blob = |cx: f32, cy: f32, r: f32| {
+                let d = ((u - cx).powi(2) + (v - cy).powi(2)).sqrt() / r;
+                (1.0 - d).clamp(0.0, 1.0).powf(1.6)
+            };
+            let (a, b) = (blob(0.3, 0.68, 0.42), blob(0.72, 0.3, 0.36));
+            let px = |i: usize| {
+                let base = from[i] + (to[i] - from[i]) * t;
+                let lit = base + (glow[i] - base) * a * 0.85;
+                (lit + (spark[i] - lit) * b * 0.7).clamp(0.0, 255.0) as u8
+            };
+            image::Rgb([px(0), px(1), px(2)])
+        })
+    }
+
+    /// The pictures in the README. The artwork shows The Diary of Jane, with
+    /// its real cover when LOSKI_README_COVER points at it (a drawn one
+    /// otherwise); the stats and Wrapped songs are made up. Run with
+    /// LOSKI_README_OUT set to a folder: `cargo test readme_pictures -- --ignored`.
+    #[test]
+    #[ignore]
+    fn readme_pictures() {
+        let Ok(dir) = std::env::var("LOSKI_README_OUT") else {
+            return;
+        };
+        let songs = [
+            ("Paper Lanterns", "The Night Shift"),
+            ("Glass Harbor", "Mira Vale"),
+            ("Static Summer", "Low Tide Club"),
+            ("Neon Orchards", "Juno Park"),
+            ("Afterglow Avenue", "The Night Shift"),
+        ];
+        let jane = std::env::var("LOSKI_README_COVER")
+            .ok()
+            .and_then(|path| image::open(path).ok())
+            .map_or_else(|| art(0), |cover| cover.to_rgb8());
+        let banner = crate::banner::render(
+            &jane,
+            &crate::banner::BannerText {
+                title: "The Diary of Jane".into(),
+                artists: "Breaking Benjamin".into(),
+                album: "Phobia".into(),
+                year: Some(2006),
+                duration_ms: 200_000,
+                explicit: false,
+            },
+        )
+        .expect("banner");
+        std::fs::write(format!("{dir}/banner.jpg"), banner).unwrap();
+
+        let minutes = [
+            42, 65, 0, 38, 120, 95, 30, 0, 55, 80, 140, 160, 72, 0, 45, 90, 110, 64, 35, 20, 75,
+            130, 185, 98, 60,
+        ];
+        let stats = StatsPicture {
+            kicker: "OCTOBER SO FAR".into(),
+            headline: "31h 12m".into(),
+            subline: "of music · 412 plays · 96 songs · 41 artists".into(),
+            chips: vec![
+                "9-day streak".into(),
+                "+4 hr vs Sep 1–25".into(),
+                "Mostly indie pop".into(),
+            ],
+            bars: minutes
+                .iter()
+                .enumerate()
+                .map(|(i, m)| Bar {
+                    value: m * 60_000,
+                    label: match i {
+                        0 => Some("Oct 1".into()),
+                        24 => Some("Oct 25".into()),
+                        _ => None,
+                    },
+                })
+                .collect(),
+            songs: songs
+                .iter()
+                .enumerate()
+                .map(|(i, (title, artist))| Song {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    plays: format!("{} plays", 23 - i * 3),
+                    cover: Some(art(i)),
+                })
+                .collect(),
+            artists: vec![
+                Artist {
+                    name: "The Night Shift".into(),
+                    detail: "41 plays · 2 hr 31 min".into(),
+                },
+                Artist {
+                    name: "Mira Vale".into(),
+                    detail: "18 plays · 58 min".into(),
+                },
+                Artist {
+                    name: "Low Tide Club".into(),
+                    detail: "12 plays · 40 min".into(),
+                },
+            ],
+        };
+        std::fs::write(format!("{dir}/stats.jpg"), render(&stats)).unwrap();
+
+        let tile = |label: &str, value: &str, detail: &str| Tile {
+            label: label.into(),
+            value: value.into(),
+            detail: detail.into(),
+        };
+        let wrapped = WrappedPicture {
+            kicker: "LOSKI WRAPPED · 2026".into(),
+            headline: "41,230 minutes".into(),
+            subline: "of music · 9,812 plays · 1,204 songs · 380 artists".into(),
+            tiles: vec![
+                tile("TOP SONG", "Paper Lanterns", "The Night Shift · 182 plays"),
+                tile("TOP ARTIST", "The Night Shift", "912 plays · 61 hours"),
+                tile("BIGGEST DAY", "Saturday, March 14", "5 hours 12 minutes"),
+                tile("LONGEST STREAK", "23 days", "in a row with music"),
+                tile("LISTENED WITH MOST", "David", "41 hours together"),
+                tile("TOP GENRE", "Indie pop", "then dream pop and synthwave"),
+            ],
+            cover: Some(art(0)),
+        };
+        std::fs::write(format!("{dir}/wrapped.jpg"), render_wrapped(&wrapped)).unwrap();
+    }
+
     #[test]
     fn leaves_out_what_the_fonts_cant_draw() {
         let (_, text) = printable("夜に駆ける YOASOBI");

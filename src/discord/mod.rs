@@ -22,8 +22,6 @@ mod voice;
 
 #[cfg(test)]
 mod card_tests;
-#[cfg(test)]
-mod readme;
 
 use std::{
     collections::{HashMap, HashSet},

@@ -100,9 +100,10 @@ pub fn component_needs(id: &str) -> Access {
 
 /// Who may send a pop-up form back.
 pub fn modal_needs(id: &str) -> Access {
-    match id {
-        "loski:m:seek" => Access::Full,
-        _ => Access::Owner,
+    if id == "loski:m:seek" || id.starts_with("loski:m:qmove:") {
+        Access::Full
+    } else {
+        Access::Owner
     }
 }
 

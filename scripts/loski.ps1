@@ -161,6 +161,24 @@ function Update-Image {
     return $false
 }
 
+# Hyper-V now and then sets aside a block of ports that includes Loski's
+# login ports (5588 and 8898), and Docker can't publish them then. Says so,
+# with the fix, when that's why Loski didn't start.
+function Show-ReservedPorts {
+    $ranges = netsh interface ipv4 show excludedportrange protocol=tcp | ForEach-Object {
+        if ($_ -match '^\s*(\d+)\s+(\d+)') { , @([int]$Matches[1], [int]$Matches[2]) }
+    }
+    $blocked = @(5588, 8898) | Where-Object {
+        $port = $_
+        $ranges | Where-Object { $port -ge $_[0] -and $port -le $_[1] }
+    }
+    if ($blocked) {
+        Write-Problem "Windows has set aside port $($blocked -join ' and ') for itself (Hyper-V does this now and then), so Docker can't use it."
+        Write-Problem 'To free it, open PowerShell as administrator and run:  net stop winnat; net start winnat'
+        Write-Problem 'Then start Loski again. Restarting Windows works too.'
+    }
+}
+
 function Start-Loski([switch]$Build) {
     $before = Get-StartedAt
     $since = Get-Date
@@ -174,6 +192,7 @@ function Start-Loski([switch]$Build) {
     }
     if ($LASTEXITCODE -ne 0) {
         Write-Problem 'Docker could not start Loski (see above).'
+        Show-ReservedPorts
         return $false
     }
     if ((Get-StartedAt) -eq $before -and (Test-Running)) {

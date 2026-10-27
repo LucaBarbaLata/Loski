@@ -46,6 +46,11 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// Small changes (volume, repeat) are batched for this long.
 const DEBOUNCE: Duration = Duration::from_millis(900);
 const QUEUE_PAGE_SIZE: usize = 10;
+
+/// The queue card's page (0-based) that shows upcoming position `pos`.
+pub fn queue_page_of(pos: usize) -> usize {
+    pos.saturating_sub(1) / QUEUE_PAGE_SIZE
+}
 /// Songs shown under "up next" on the panel.
 const UP_NEXT_SHOWN: usize = 2;
 /// Songs shown by /history.
@@ -972,6 +977,7 @@ pub fn queue_card(
             escape_md(&truncate(&track.title, 60)),
             escape_md(&truncate(&track.artists_joined(), 40))
         )));
+        let last = view.upcoming.len();
         components.push(cards::row(vec![
             Btn::icon(&format!("loski:qact:play:{target}"), Icon::Play)
                 .with_label("Play now")
@@ -981,6 +987,18 @@ pub fn queue_card(
                 .with_label("Play next")
                 .disabled(pos == 1)
                 .build(icons),
+            // One step at a time; the song stays picked for the next press.
+            Btn::icon(&format!("loski:qact:up:{target}"), Icon::MoveUp)
+                .disabled(pos == 1)
+                .build(icons),
+            Btn::icon(&format!("loski:qact:down:{target}"), Icon::MoveDown)
+                .disabled(pos == last)
+                .build(icons),
+            Btn::label(&format!("loski:qact:to:{target}"), "Move to…")
+                .disabled(last < 2)
+                .build(icons),
+        ]));
+        components.push(cards::row(vec![
             Btn::label(&format!("loski:qact:del:{target}"), "Remove")
                 .style(ButtonStyle::Danger)
                 .build(icons),

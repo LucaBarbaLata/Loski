@@ -227,11 +227,21 @@ fn queue_card_is_valid_on_every_page() {
         connect: false,
         duplicates: 3,
     };
+    let last = view.upcoming.len();
     for page in 0..6 {
-        for selected in [None, Some(1), Some(page * 10 + 3), Some(999)] {
+        for selected in [None, Some(1), Some(page * 10 + 3), Some(last), Some(999)] {
             assert_valid(panel::queue_card(&icons, 0x112233, &view, page, selected));
         }
     }
+    // A song that moves keeps its page in view.
+    assert_eq!(panel::queue_page_of(1), 0);
+    assert_eq!(panel::queue_page_of(10), 0);
+    assert_eq!(panel::queue_page_of(11), 1);
+    let one = QueueView {
+        upcoming: vec![track(2, false)],
+        ..view
+    };
+    assert_valid(panel::queue_card(&icons, 0x112233, &one, 0, Some(1)));
     let empty = QueueView {
         current: None,
         status: Status::Idle,
