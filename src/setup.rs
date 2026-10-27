@@ -198,7 +198,7 @@ fn escape(s: &str) -> String {
 }
 
 const STYLE: &str = r#"
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f1012;color:#e8e8ea;font:16px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;padding:24px 16px;box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f1012;color:#e8e8ea;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,sans-serif;padding:24px 16px;box-sizing:border-box}
 main{max-width:36rem;width:100%}
 h1{font-size:1.6rem;margin:.25rem 0 .5rem}h2{font-size:1rem;margin:1.6rem 0 .4rem}
 p,li{color:#b4b5ba}a{color:#f2a33a}code{background:#1c1d21;padding:.1em .35em;border-radius:4px;color:#e8e8ea}
@@ -209,6 +209,8 @@ input:focus{outline:2px solid #f2a33a;outline-offset:1px}
 button,.btn{display:inline-block;margin-top:1.4rem;padding:.7rem 1.4rem;border-radius:999px;border:0;background:#f2a33a;color:#111;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}
 .error{background:#3a1616;border:1px solid #7a2a2a;color:#ffb4b4;padding:.8rem 1rem;border-radius:10px}
 .step{background:#16171a;border:1px solid #26282d;border-radius:14px;padding:1rem 1.2rem;margin:1rem 0}
+.step>h2:first-child{margin-top:0}.step>:last-child{margin-bottom:0}.step .btn{margin-top:.25rem}
+h1,h2{font-weight:700}
 .claim{font-size:1.4rem;letter-spacing:.06em}
 "#;
 
@@ -334,6 +336,19 @@ pub async fn run(dir: &Path, port: u16, claim: Option<&str>) -> Result<()> {
             }
         }
     }
+}
+
+/// The setup page before and after the keys are saved, for the README.
+#[cfg(test)]
+pub fn sample_pages(port: u16, claim: &str) -> (String, String) {
+    let bot = Bot {
+        name: "Loski".into(),
+        app_id: "123456789012345678".into(),
+    };
+    (
+        form(port, None, &HashMap::new()),
+        done(port, &bot, Some(claim)),
+    )
 }
 
 #[cfg(test)]

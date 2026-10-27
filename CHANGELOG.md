@@ -2,6 +2,13 @@
 
 What changed in each Loski release. Loski DMs you when a new one is out; `.\loski update` brings it in.
 
+## Unreleased
+
+### Changed
+
+- The README is a tour now, with pictures of every card (the panel, lyrics, the queue, requests, the recap, settings, friends, My sound) and the setup page. They're drawn from Loski's own code, by `src/discord/readme.rs` and `scripts/readme/`, so they stay true to what it shows.
+- The setup page's steps sit tighter, without the gap above each heading.
+
 ## 2.0.0 (2026-10-26)
 
 ### Added

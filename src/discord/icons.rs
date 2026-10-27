@@ -131,6 +131,17 @@ impl Icons {
     pub fn is_ready(&self) -> bool {
         self.ids.read().len() == Icon::ALL.len()
     }
+
+    /// Every icon with a made-up id, as if they were uploaded (for drawing
+    /// the cards outside Discord).
+    #[cfg(test)]
+    pub fn uploaded() -> Self {
+        let icons = Self::default();
+        for (n, &icon) in Icon::ALL.iter().enumerate() {
+            icons.ids.write().insert(icon, Id::new(n as u64 + 1));
+        }
+        icons
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
