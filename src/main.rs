@@ -11,6 +11,7 @@ mod personality;
 mod picture;
 mod selftest;
 mod setup;
+mod speech;
 mod spotify;
 mod stats;
 mod store;

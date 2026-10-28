@@ -38,6 +38,8 @@ pub struct Prefs {
     pub panel_channel: Option<u64>,
     /// The slim panel, without the artwork.
     pub compact: bool,
+    /// How the panel's artwork looks.
+    pub style: crate::banner::Style,
     /// How long Loski waits after you leave the call.
     pub leave_after_secs: Option<u64>,
     /// How long Loski waits after the music ends.
@@ -46,6 +48,8 @@ pub struct Prefs {
     pub bitrate_kbps: Option<u32>,
     pub timezone: Option<String>,
     pub requests_off: bool,
+    /// Party mode: the call votes on requests, and the top one plays next.
+    pub party: bool,
     /// "My sound": decibels for bass, low-mid, mid, high-mid and treble.
     pub eq: [i8; 5],
     /// 24/7: stay in voice and keep the music going.
@@ -60,6 +64,10 @@ pub struct Prefs {
     /// Co-DJs can add songs, but not control playback.
     pub djs_queue_only: bool,
     pub vote_skip_off: bool,
+    /// Voice commands (beta) are on.
+    pub voice: bool,
+    /// Who said yes to voice commands (Discord user ids).
+    pub voice_people: Vec<u64>,
 }
 
 /// One song you listened to. Entries from before listening time was

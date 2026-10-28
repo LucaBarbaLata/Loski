@@ -8,11 +8,22 @@ What changed in each Loski release. Loski DMs you when a new one is out; `.\losk
 
 - Reorder the queue from the queue card: pick a song, then move it up or down a step at a time (it stays picked), or straight to any position.
 - Log in to Spotify from anywhere, for Loski on a server: the login DM has the two approvals as buttons, and you send Loski the address the browser ends up on. Signing back in to search works the same way.
+- `/customize`: make the bot your own. Its name, picture, banner and About me from one card, with the pictures uploaded right there, or a nickname, picture, banner and bio for one server. Its messages, commands, right-click entries, Spotify Connect device and stats pictures go by its name.
+- An interactive `/help`, only you see it: a page per topic with clickable commands (they fill in the chat box) and buttons that do the main things, and **Find a command** for whatever you'd like to do. Everyone sees only what they may use, and the welcome DM is the same guide.
+- Party mode for song requests, in `/settings` → Friends: everyone in the call votes on the waiting requests, and the one with the most votes plays next, by itself.
+- Panel styles, in `/settings`: the artwork banner as Glass (as before), Vinyl (the cover as a sleeve, with the record sliding out) or Minimal (the cover beside a flat colour from it).
+- Voice commands (beta), in `/voice`: say "Loski, skip", "Loski, pause" or "Loski, play" and a song in the call. Speech is understood on the computer Loski runs on, with a 60 MB model downloaded when you turn them on, and only for people who said yes. English only for now.
+- `/join`: bring Loski into your voice channel without playing anything yet.
+- `/24-7`: switch 24/7 on or off without opening `/settings`. Turned on while you're in a call, Loski joins you and gets the music going.
+- `INSTALLATION.md`: every way to run Loski, step by step. Windows, macOS and Linux, a server or VPS, a Raspberry Pi, a NAS or Portainer, plain `docker run` and building it yourself, plus updating, backups and moving.
 
 ### Changed
 
 - The setup page's steps sit tighter, without the gap above each heading.
 - On Windows, `loski start` says when Hyper-V has reserved Loski's login ports, and how to free them.
+- Loski no longer renames the bot to "Loski" on every start, or puts its own picture over one you set in Discord's developer portal. A new bot gets Loski's look, and what you change stays. `BOT_NAME` still names it.
+- The invite link also asks for Change Nickname, for a nickname of its own in a server.
+- 24/7 keeps playing when nobody's in the call, instead of pausing until someone joins. Music played to an empty room doesn't count in your stats or history.
 
 ### Fixed
 

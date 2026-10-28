@@ -168,7 +168,7 @@ pub async fn normalize(ix: &Ix, cmd: NormalizeCmd) -> Result<()> {
             let state = if on { "on" } else { "off" };
             if changed {
                 format!(
-                    "Volume levelling is **{state}**. Remembered for next time.\n-# Spotify Connect picks it up after Loski restarts."
+                    "Volume levelling is **{state}**. Remembered for next time.\n-# Spotify Connect picks it up after I restart."
                 )
             } else {
                 format!("Volume levelling was already **{state}**.")

@@ -11,6 +11,7 @@ use librespot_playback::{
     mixer::{Mixer as _, MixerConfig, softmixer::SoftMixer},
     player::Player,
 };
+use parking_lot::Mutex;
 use rand::Rng;
 
 use super::{cache, cached_credentials};
@@ -40,6 +41,7 @@ async fn start(
     cfg: &Config,
     engine: &Arc<Engine>,
     mixer: Arc<Mixer>,
+    name: &str,
 ) -> Result<impl Future<Output = ()> + use<>> {
     let credentials = cached_credentials(cfg).context("no stored Spotify login")?;
     let session = Session::new(
@@ -59,7 +61,7 @@ async fn start(
     );
     let events = player.get_player_event_channel();
     let config = ConnectConfig {
-        name: cfg.bot_name.clone(),
+        name: name.to_string(),
         device_type: DeviceType::Speaker,
         initial_volume: u16::MAX,
         ..ConnectConfig::default()
@@ -71,14 +73,20 @@ async fn start(
     Ok(task)
 }
 
-/// Runs the Connect device for as long as Loski runs, restarting it if
-/// its connection drops.
-pub async fn run(cfg: Arc<Config>, engine: Arc<Engine>) {
+/// Runs the Connect device for as long as Loski runs, under the bot's
+/// `name`, restarting it if its connection drops or the bot is renamed.
+pub async fn run(cfg: Arc<Config>, engine: Arc<Engine>, name: Arc<Mutex<String>>) {
     loop {
-        match start(&cfg, &engine, engine.mixer()).await {
+        let called = name.lock().clone();
+        match start(&cfg, &engine, engine.mixer(), &called).await {
             Ok(task) => {
                 tracing::info!("Loski is available as a Spotify Connect device");
                 task.await;
+                if *name.lock() != called {
+                    // Renamed: back straight away under the new name.
+                    engine.detach_connect();
+                    continue;
+                }
                 tracing::warn!("Spotify Connect stopped; restarting it");
             }
             Err(e) => tracing::warn!("Couldn't start Spotify Connect: {e:#}"),

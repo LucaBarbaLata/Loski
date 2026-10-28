@@ -59,13 +59,14 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         Err(e) => println!("✗ liked songs: {e:#}"),
     }
 
+    let name = bot_name(&cfg).await;
     let devices = spotify.web.device_names().await?;
-    let loski = devices.iter().any(|d| *d == cfg.bot_name);
+    let loski = devices.contains(&name);
     println!(
         "{} Spotify Connect devices online: {} ({} listed)",
         if loski { "✓" } else { "✗" },
         devices.join(", "),
-        cfg.bot_name
+        name
     );
 
     let playlists = spotify.my_playlists().await?;
@@ -76,4 +77,16 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         names.join(", ")
     );
     Ok(())
+}
+
+/// The bot's Discord name, which the Spotify Connect device goes by.
+async fn bot_name(cfg: &Config) -> String {
+    let http = twilight_http::Client::new(cfg.discord_token.clone());
+    let discord = match http.current_user().await {
+        Ok(response) => response.model().await.ok().map(|me| me.name),
+        Err(_) => None,
+    };
+    discord
+        .or_else(|| cfg.bot_name.clone())
+        .unwrap_or_else(|| "Loski".to_string())
 }

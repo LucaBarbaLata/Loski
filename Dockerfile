@@ -2,15 +2,21 @@
 
 FROM rust:1.99.1-bookworm AS build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake pkg-config libopus-dev \
+    && apt-get install -y --no-install-recommends cmake pkg-config libopus-dev clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY assets ./assets
 COPY src ./src
+# The speech model for voice commands (whisper.cpp) is built for any x86
+# processor with AVX2, or any 64-bit ARM, not just the machine building it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    export GGML_NATIVE=OFF \
+    && if [ "$(uname -m)" = x86_64 ]; then \
+        export GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON; \
+    fi \
+    && cargo build --release --locked \
     && cp target/release/loski /usr/local/bin/loski
 
 FROM debian:bookworm-slim

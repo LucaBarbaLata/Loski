@@ -53,9 +53,10 @@ impl Inner {
         });
     }
 
-    /// Adds the time since the last call, if the music was playing.
+    /// Adds the time since the last call, if the music was playing to
+    /// someone.
     pub(super) fn tick_listen(&mut self) {
-        let playing = self.status == Status::Playing;
+        let playing = self.status == Status::Playing && !self.alone;
         if let Some(listen) = &mut self.listen {
             let now = Instant::now();
             if playing {

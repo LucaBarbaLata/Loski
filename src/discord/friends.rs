@@ -24,7 +24,7 @@ use super::{
     cards::{self, Btn, color},
     icons::{Icon, Icons},
     interact::Ix,
-    library, oops, settings,
+    library, oops, requests, settings,
 };
 use crate::{
     spotify::auth::now_unix,
@@ -49,18 +49,20 @@ pub enum Access {
 /// Who may use a slash command (or a right-click command, by its name).
 pub fn command_needs(name: &str) -> Access {
     match name {
-        "request" | "lyrics" | "help" => Access::Listener,
-        "play" | "queue" | "nowplaying" | library::QUEUE_WITH => Access::Queue,
+        "request" | "lyrics" | "help" | "voice" => Access::Listener,
+        "play" | "queue" | "nowplaying" | "join" => Access::Queue,
+        menu if library::is_queue_menu(menu) => Access::Queue,
         "settings" | "stats" | "wrapped" | "history" | "mix" | "follow" | "liked" | "playlist"
-        | "status" | "normalize" => Access::Owner,
+        | "status" | "normalize" | "customize" | "24-7" => Access::Owner,
         _ => Access::Full,
     }
 }
 
 /// Who may press a button or use a menu, by its custom id.
 pub fn component_needs(id: &str) -> Access {
-    const OWNER: [&str; 10] = [
+    const OWNER: [&str; 11] = [
         "loski:set:",
+        "loski:me:",
         "loski:eq:",
         "loski:friends:",
         "loski:mix",
@@ -72,7 +74,14 @@ pub fn component_needs(id: &str) -> Access {
         "loski:qsavemix",
     ];
     // Skip is a vote for anyone who can't skip by themselves.
-    const LISTENER: [&str; 3] = ["loski:like", "loski:skip", "loski:lyrics"];
+    const LISTENER: [&str; 6] = [
+        "loski:like",
+        "loski:skip",
+        "loski:lyrics",
+        "loski:help:",
+        "loski:voice:",
+        "req:vote:",
+    ];
     const QUEUE: [&str; 9] = [
         "loski:queue",
         "loski:qpage:",
@@ -100,7 +109,9 @@ pub fn component_needs(id: &str) -> Access {
 
 /// Who may send a pop-up form back.
 pub fn modal_needs(id: &str) -> Access {
-    if id == "loski:m:seek" || id.starts_with("loski:m:qmove:") {
+    if id == "loski:m:helpfind" {
+        Access::Listener
+    } else if id == "loski:m:seek" || id.starts_with("loski:m:qmove:") {
         Access::Full
     } else {
         Access::Owner
@@ -364,6 +375,10 @@ pub fn room_view(app: &App, track: Option<&TrackInfo>) -> RoomView {
 /// the panel shows it, and new friends' names are remembered.
 pub fn people_changed(app: &App) {
     let people = listeners(app);
+    if let Some(core) = app.core.get() {
+        // Music to an empty room (24/7) isn't you listening.
+        core.engine.set_alone(people.is_empty());
+    }
     let present: Vec<(u64, String)> = people.iter().map(|l| (l.id, l.name.clone())).collect();
     {
         // Voice updates come for the whole server (mutes, other channels).
@@ -540,7 +555,13 @@ pub fn friends_card(icons: &Icons, prefs: &Prefs) -> Component {
                         "Song requests: anyone can ask",
                         "on",
                         "With /request; they wait on one card for you or a co-DJ",
-                        !prefs.requests_off,
+                        !prefs.requests_off && !prefs.party,
+                    ),
+                    option(
+                        "Song requests: party mode",
+                        "party",
+                        "Everyone in the call votes; the top request plays next",
+                        !prefs.requests_off && prefs.party,
                     ),
                     option(
                         "Song requests: off",
@@ -594,7 +615,16 @@ pub async fn change(ix: &Ix, key: &str, values: &[String]) -> Result<()> {
             app.update_prefs(|p| p.dj_role = role);
         }
         "level" => app.update_prefs(|p| p.djs_queue_only = value == Some("queue")),
-        "requests" => app.update_prefs(|p| p.requests_off = value == Some("off")),
+        "requests" => {
+            app.update_prefs(|p| {
+                p.requests_off = value == Some("off");
+                p.party = value == Some("party");
+            });
+            // The card gains or loses its vote buttons, and party mode may
+            // have a song to put up next.
+            let app = app.clone();
+            tokio::spawn(async move { requests::refresh(&app).await });
+        }
         "votes" => {
             app.update_prefs(|p| p.vote_skip_off = value == Some("off"));
             app.ui.mark_dirty();
@@ -620,8 +650,12 @@ mod tests {
         assert_eq!(command_needs("play"), Access::Queue);
         assert_eq!(command_needs("skip"), Access::Full);
         assert_eq!(command_needs("settings"), Access::Owner);
-        assert_eq!(command_needs(library::PLAY_WITH), Access::Full);
-        assert_eq!(command_needs(library::QUEUE_WITH), Access::Queue);
+        for bot in ["Loski", "A name far too long for the menu"] {
+            let (play, queue) = library::menu_names(bot);
+            assert_eq!(command_needs(&play), Access::Full);
+            assert_eq!(command_needs(&queue), Access::Queue);
+        }
+        assert_eq!(command_needs("customize"), Access::Owner);
         assert_eq!(component_needs("loski:like"), Access::Listener);
         assert_eq!(component_needs("loski:skip"), Access::Listener);
         assert_eq!(component_needs("loski:toggle"), Access::Full);

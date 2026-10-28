@@ -2,7 +2,10 @@ mod blend;
 mod cards;
 mod commands;
 mod components;
+mod customize;
 mod friends;
+mod hearing;
+mod help;
 mod icons;
 mod interact;
 mod library;
@@ -55,7 +58,7 @@ use twilight_model::{
     },
     id::{
         Id,
-        marker::{ApplicationMarker, ChannelMarker, MessageMarker, UserMarker},
+        marker::{ApplicationMarker, ChannelMarker, GuildMarker, MessageMarker, UserMarker},
     },
 };
 
@@ -126,6 +129,12 @@ pub struct App {
     pub sender: MessageSender,
     pub app_id: Id<ApplicationMarker>,
     pub bot_id: Id<UserMarker>,
+    /// The bot's name in Discord (see `profile.rs`).
+    pub name: Arc<Mutex<String>>,
+    /// Voice commands (beta): what Loski hears in the call.
+    pub ears: Arc<hearing::Ears>,
+    /// Each server's commands by name, for /help's clickable commands.
+    pub command_ids: Mutex<HashMap<Id<GuildMarker>, help::CommandIds>>,
     pub web: reqwest::Client,
     pub store: Arc<Store>,
     pub core: OnceLock<Arc<Core>>,
@@ -282,7 +291,11 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token.clone(), intents);
     let sender = shard.sender();
     let shards = TwilightMap::new(HashMap::from([(shard.id().number(), sender.clone())]));
-    let songbird = Arc::new(Songbird::twilight(Arc::new(shards), bot.id));
+    let songbird = Arc::new(Songbird::twilight_from_config(
+        Arc::new(shards),
+        bot.id,
+        hearing::call_config(),
+    ));
 
     let cache = DefaultInMemoryCache::builder()
         // Members and users come with voice states: names for who's listening.
@@ -300,6 +313,7 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
     let store =
         Arc::new(Store::new(cfg.data_dir.clone()).context("could not create the data folder")?);
     let prefs = store.load_prefs();
+    let (ears, heard) = hearing::Ears::new(&prefs.voice_people);
     let names = store.load_names();
     let genres = Genres::load(&cfg.data_dir);
     let owner = cfg.owner_id.unwrap_or_else(|| {
@@ -317,6 +331,9 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
         sender,
         app_id: application.id,
         bot_id: bot.id,
+        name: Arc::new(Mutex::new(bot.name.clone())),
+        ears: Arc::new(ears),
+        command_ids: Mutex::new(HashMap::new()),
         web,
         store,
         core: OnceLock::new(),
@@ -357,6 +374,8 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
         });
     }
     tokio::spawn(profile::sync(app.clone()));
+    tokio::spawn(hearing::run(app.clone(), heard));
+    tokio::spawn(hearing::wake(app.clone()));
     tokio::spawn(updates::check_loop(app.clone()));
     tokio::spawn(init_core(app.clone()));
 
@@ -420,8 +439,9 @@ async fn handle_event(app: Arc<App>, event: Event) {
             app.set_listening(None);
             if ready.guilds.is_empty() {
                 tracing::warn!(
-                    "Loski isn't in any server yet. Invite it with: https://discord.com/oauth2/authorize?client_id={}&scope=bot+applications.commands&permissions=281474979941376",
-                    app.app_id
+                    "Loski isn't in any server yet. Invite it with: https://discord.com/oauth2/authorize?client_id={}&scope=bot+applications.commands&permissions={}",
+                    app.app_id,
+                    crate::setup::PERMISSIONS
                 );
             }
         }
@@ -443,6 +463,7 @@ async fn handle_event(app: Arc<App>, event: Event) {
             }
         }
         Event::VoiceStateUpdate(update) => voice::on_voice_state(&app, &update.0).await,
+        Event::UserUpdate(user) => profile::on_user_update(&app, &user.0).await,
         Event::MessageCreate(message) => {
             // A login address from you first; otherwise maybe a claim.
             if !login::on_paste(&app, &message.0).await {
@@ -544,7 +565,8 @@ async fn welcome_once(app: &App) {
         return;
     };
     let Ok(dm) = dm.model().await else { return };
-    let card = commands::help_card(&app.icons);
+    let view = help::HelpView::read(app, friends::Access::Owner, None);
+    let card = help::home_card(&app.icons, &view);
     let sent = app
         .http
         .create_message(dm.id)
@@ -608,7 +630,11 @@ async fn try_init_core(app: &Arc<App>) -> Result<Arc<Core>> {
     tokio::spawn(voice::heal_loop(app.clone()));
     tokio::spawn(lyrics::follow_loop(app.clone(), core.clone()));
     tokio::spawn(connect_queue_loop(core.clone()));
-    tokio::spawn(spotify::connect::run(cfg.clone(), core.engine.clone()));
+    tokio::spawn(spotify::connect::run(
+        cfg.clone(),
+        core.engine.clone(),
+        app.name.clone(),
+    ));
     Ok(core)
 }
 

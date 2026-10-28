@@ -150,6 +150,7 @@ impl Harness {
             played: Vec::new(),
             connect_up_next: Vec::new(),
             audience: Vec::new(),
+            alone: false,
         };
         Self {
             engine: Engine {

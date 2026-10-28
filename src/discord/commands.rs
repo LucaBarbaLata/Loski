@@ -31,7 +31,7 @@ use super::{
     library, lyrics, mixes, oops, panel, requests, settings, sound, stats, status, voice,
 };
 use crate::{
-    engine::Repeat,
+    engine::{Repeat, Status},
     personality,
     spotify::{
         Lookup, MAX_TRACKS_PER_REQUEST, parse_lookup,
@@ -249,11 +249,29 @@ pub enum HistoryWhen {
 pub struct StopCmd;
 
 #[derive(CommandModel, CreateCommand)]
+#[command(
+    name = "join",
+    desc = "Come into your voice channel, without playing anything yet"
+)]
+pub struct JoinCmd;
+
+#[derive(CommandModel, CreateCommand)]
+#[command(
+    name = "24-7",
+    desc = "Stay in voice and keep the music going, even when nobody's listening"
+)]
+pub struct AlwaysOnCmd {
+    /// On or off (leave it out to switch)
+    on: Option<bool>,
+}
+
+#[derive(CommandModel, CreateCommand)]
 #[command(name = "help", desc = "Everything Loski can do")]
 pub struct HelpCmd;
 
-pub(super) fn definitions() -> Vec<Command> {
-    [
+/// Every command. Descriptions and right-click entries go by the bot's name.
+pub(super) fn definitions(bot: &str) -> Vec<Command> {
+    let mut commands: Vec<Command> = [
         PlayCmd::create_command().into(),
         PauseCmd::create_command().into(),
         ResumeCmd::create_command().into(),
@@ -274,6 +292,8 @@ pub(super) fn definitions() -> Vec<Command> {
         FollowCmd::create_command().into(),
         HistoryCmd::create_command().into(),
         StopCmd::create_command().into(),
+        JoinCmd::create_command().into(),
+        AlwaysOnCmd::create_command().into(),
         HelpCmd::create_command().into(),
         library::RadioCmd::create_command().into(),
         library::LikedCmd::create_command().into(),
@@ -288,18 +308,33 @@ pub(super) fn definitions() -> Vec<Command> {
         lyrics::LyricsCmd::create_command().into(),
         settings::SettingsCmd::create_command().into(),
         stats::WrappedCmd::create_command().into(),
+        super::customize::CustomizeCmd::create_command().into(),
+        super::hearing::VoiceCmd::create_command().into(),
     ]
     .into_iter()
-    .chain(library::message_commands())
-    .collect()
+    .chain(library::message_commands(bot))
+    .collect();
+    for command in &mut commands {
+        command.description = command.description.replace("Loski", bot);
+    }
+    commands
 }
 
 /// Commands are registered per server so changes show up immediately.
+/// Their ids are kept for /help's clickable commands.
 pub async fn register(app: &App, guild: Id<GuildMarker>) -> Result<()> {
-    app.http
+    let registered = app
+        .http
         .interaction(app.app_id)
-        .set_guild_commands(guild, &definitions())
+        .set_guild_commands(guild, &definitions(&app.name()))
+        .await?
+        .models()
         .await?;
+    let ids = registered
+        .into_iter()
+        .filter_map(|command| Some((command.name, command.id?)))
+        .collect();
+    app.command_ids.lock().insert(guild, ids);
     Ok(())
 }
 
@@ -355,6 +390,8 @@ pub async fn run(app: Arc<App>, interaction: Interaction) {
         "follow" => FollowCmd => follow,
         "history" => HistoryCmd => history,
         "stop" => StopCmd => stop,
+        "join" => JoinCmd => join,
+        "24-7" => AlwaysOnCmd => always_on,
         "help" => HelpCmd => help,
         "radio" => library::RadioCmd => radio,
         "liked" => library::LikedCmd => liked,
@@ -369,6 +406,8 @@ pub async fn run(app: Arc<App>, interaction: Interaction) {
         "lyrics" => lyrics::LyricsCmd => lyrics_cmd,
         "settings" => settings::SettingsCmd => settings_cmd,
         "wrapped" => stats::WrappedCmd => wrapped,
+        "customize" => super::customize::CustomizeCmd => customize,
+        "voice" => super::hearing::VoiceCmd => voice_cmd,
     };
     if let Err(e) = result {
         ix.fail(e).await;
@@ -1146,101 +1185,120 @@ async fn stop(ix: &Ix, _: StopCmd) -> Result<()> {
     ix.reply_temp(vec![card], SHORT_SECS).await
 }
 
-async fn help(ix: &Ix, _: HelpCmd) -> Result<()> {
-    ix.reply_temp(vec![help_card(&ix.app.icons)], LONG_SECS)
-        .await
+async fn join(ix: &Ix, _: JoinCmd) -> Result<()> {
+    let app = &ix.app;
+    let core = app.core()?;
+    let (guild, channel) = require_voice(ix)?;
+    if app.voice.channel() == Some(channel) {
+        let card = cards::info(&app.icons, &format!("I'm already in <#{channel}>."));
+        return ix.reply_temp(vec![card], SHORT_SECS).await;
+    }
+    ix.defer().await?;
+    if let Some(home) = ix.channel_id {
+        app.ui.set_home(home);
+    }
+    voice::join(app, &core, guild, channel).await?;
+    let snap = core.engine.snapshot();
+    let quiet = snap.status == Status::Idle && !snap.following && !snap.connect;
+    let text = if !quiet {
+        format!("**Here in <#{channel}>.** The music came with me.")
+    } else if app.always_on() {
+        format!("**Here in <#{channel}>,** and staying: 24/7 is on, so I'll keep the music going.")
+    } else {
+        // Nothing to play: the usual wait before leaving starts now.
+        voice::schedule_idle_leave(app);
+        format!("**Here in <#{channel}>.** `/play` something, or I'll head out in a few minutes.")
+    };
+    let card = cards::toast(&app.icons, &text, None, color::SUCCESS);
+    ix.reply_temp(vec![card], SHORT_SECS).await
 }
 
-/// Every command, grouped by what you're trying to do. Also the welcome DM.
-pub(super) fn help_card(icons: &Icons) -> Component {
-    let group = |title: &str, lines: &[&str]| {
-        format!(
-            "-# {title}
-{}",
-            lines.join(
-                "
-"
-            )
-        )
-    };
-    cards::card(
-        Some(color::BRAND),
-        vec![
-            cards::text(format!(
-                "{} **Loski**
-Your private Spotify DJ. You control me, along with any co-DJs you pick in `/settings`; everyone in the call can listen, like songs and vote to skip.",
-                icons.md(Icon::Music)
-            )),
-            cards::divider(),
-            cards::text(group(
-                "PLAY",
-                &[
-                    "`/play` a song, album, playlist or artist. Start typing for suggestions, or leave it empty for recent plays.",
-                    "`/liked` your Liked Songs · `/playlist` one of your playlists · `/radio` similar songs",
-                    "Right-click a message with a Spotify link → Apps → **Play with Loski**.",
-                ],
-            )),
-            cards::text(group(
-                "FROM YOUR PHONE",
-                &[
-                    "Pick **Loski** in the Spotify app's device list and your phone becomes the remote.",
-                    "`/follow` mirrors whatever you're playing on Spotify instead.",
-                ],
-            )),
-            cards::text(group(
-                "CONTROL",
-                &[
-                    "`/pause` `/resume` `/skip` `/previous` `/seek` `/volume`",
-                    "The panel's buttons do the same, and its More menu jumps 15 seconds or to a time you type.",
-                ],
-            )),
-            cards::text(group(
-                "QUEUE",
-                &[
-                    "`/queue` see what's next, then pick a song to play, move or remove.",
-                    "`/skipto` `/move` `/remove` (one song or a run) `/dedupe` `/clear` `/shuffle` `/repeat`",
-                    "`/mix save` keeps the queue under a name; `/mix load` brings it back.",
-                ],
-            )),
-            cards::text(group(
-                "SOUND",
-                &[
-                    "`/filter` bass boost, nightcore, slowed, 8D… (also the panel's Sound menu)",
-                    "`/crossfade` blend songs; albums stay gapless · `/normalize` level loudness",
-                    "`/sleep` fade out and leave later, or after this song",
-                ],
-            )),
-            cards::text(group(
-                "YOU",
-                &[
-                    "`/stats` listening time, top songs, artists and genres, streaks, and who you listen with",
-                    "`/history` recent plays, or search them by words, time or friend; play any again",
-                    "`/wrapped` your year in pictures (it also arrives on January 1st)",
-                    "Every Monday your **Blend** mix mixes your top songs with what friends liked: `/mix load name:Blend`",
-                ],
-            )),
-            cards::text(group(
-                "FRIENDS",
-                &[
-                    "Anyone in the server can `/request` a song; requests wait on one card for you or a co-DJ.",
-                    "Everyone in the call can press ♥ on the panel, and Skip to vote. `/liked from:friends` plays what they liked.",
-                    "Co-DJs, by name or with a DJ role: `/settings` → Friends.",
-                ],
-            )),
-            cards::text(group(
-                "MORE",
-                &[
-                    "`/lyrics` sing along, line by line · `/nowplaying` bring the panel back down",
-                    "`/settings` the panel, leaving, 24/7, sound and requests, in one card",
-                    "`/status` check on me · `/stop` leave the call",
-                ],
-            )),
-            cards::divider(),
-            cards::text(
-                "-# I leave a minute after you do, and a few minutes after the queue runs out (or stay with 24/7, in `/settings`); the panel then sums up the session. On the 1st of each month I DM you a recap.",
+async fn always_on(ix: &Ix, cmd: AlwaysOnCmd) -> Result<()> {
+    let app = &ix.app;
+    let on = cmd.on.unwrap_or(!app.always_on());
+    ix.defer().await?;
+    settings::set_always_on(app, on);
+    // The panel says whether Loski is about to leave.
+    app.ui.mark_dirty();
+    // Switched on while Loski's out of voice: it comes to you, if you're in a call.
+    if on
+        && app.voice.guild().is_none()
+        && let Ok((guild, channel)) = require_voice(ix)
+    {
+        let core = app.core()?;
+        if let Some(home) = ix.channel_id {
+            app.ui.set_home(home);
+        }
+        voice::join(app, &core, guild, channel).await?;
+    }
+    voice::always_on_changed(app).await;
+    let card = match (on, app.voice.channel()) {
+        (true, Some(channel)) => cards::toast(
+            &app.icons,
+            &format!(
+                "**24/7 is on.** I'm staying in <#{channel}> and keeping the music going, even when nobody's there. When the queue runs out, a radio picks up from the last song.\n\
+                 -# Songs I play to an empty room don't count in your stats. `/stop` sends me away until the next `/play`."
             ),
-        ],
-    )
+            None,
+            color::SUCCESS,
+        ),
+        (true, None) => cards::toast(
+            &app.icons,
+            "**24/7 is on.** I'll stay in the next channel you `/join` or `/play` in, and keep the music going there.",
+            None,
+            color::SUCCESS,
+        ),
+        (false, _) => cards::info(
+            &app.icons,
+            "**24/7 is off.** I'll leave the usual way: after you go, or a while after the music ends.",
+        ),
+    };
+    ix.reply_temp(vec![card], super::ERROR_SECS).await
+}
+
+async fn help(ix: &Ix, cmd: HelpCmd) -> Result<()> {
+    super::help::help(ix, cmd).await
+}
+
+/// What a /help page's button runs: the command, with its usual choices.
+pub(super) async fn shortcut(ix: &Ix, command: &str) -> Result<()> {
+    let app = &ix.app;
+    match command {
+        "nowplaying" => now_playing(ix, NowPlayingCmd).await,
+        "lyrics" => lyrics::open(ix, &*app.core()?).await,
+        "queue" => queue(ix, QueueCmd { page: None }).await,
+        "history" => {
+            let everything = HistoryCmd {
+                search: None,
+                when: None,
+                with: None,
+                requests: None,
+            };
+            history(ix, everything).await
+        }
+        "mix" => mixes::mix(ix, mixes::MixCmd::List(mixes::MixListCmd)).await,
+        "stats" => stats::show(ix, crate::stats::Range::Month, LONG_SECS * 2).await,
+        "settings" => settings::settings(ix, settings::SettingsCmd).await,
+        "customize" => super::customize::customize(ix, super::customize::CustomizeCmd).await,
+        "status" => status::status(ix, status::StatusCmd).await,
+        "mysound" => {
+            let card = sound::eq_card(&app.icons, &sound::EqView::read(app), false);
+            ix.reply_private(vec![card]).await
+        }
+        "friends" => {
+            let card = friends::friends_card(&app.icons, &app.prefs());
+            ix.reply_private(vec![card]).await
+        }
+        _ => ix.ack().await,
+    }
+}
+
+async fn customize(ix: &Ix, cmd: super::customize::CustomizeCmd) -> Result<()> {
+    super::customize::customize(ix, cmd).await
+}
+
+async fn voice_cmd(ix: &Ix, cmd: super::hearing::VoiceCmd) -> Result<()> {
+    super::hearing::voice_cmd(ix, cmd).await
 }
 
 async fn radio(ix: &Ix, cmd: library::RadioCmd) -> Result<()> {

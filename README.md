@@ -27,21 +27,24 @@ A private Discord music bot that streams **real Spotify audio** (your Premium ac
 - Your library and stations: `/liked`, `/playlist` (your playlists suggested as you type), `/radio`
 - Search with tabs for songs, albums, playlists and artists; right-click any message with a Spotify link to play it
 - Follow mode: mirrors whatever you're playing on your own Spotify, in sync
-- A live now-playing panel: a frosted-glass artwork banner Loski draws for each song, a colour taken from the cover, where the song is playing from, an icon progress bar, the next two songs with their covers (from your Spotify app's queue when it's in charge), and controls
+- A live now-playing panel: an artwork banner Loski draws for each song (frosted glass, a vinyl record sliding out of its sleeve, or minimal), a colour taken from the cover, where the song is playing from, an icon progress bar, the next two songs with their covers (from your Spotify app's queue when it's in charge), and controls
 - Live lyrics that follow the song line by line, from the panel's Lyrics button, and `/lyrics` for any song
 - The song in the voice channel's status, so people see what's on before they join
 - When Loski leaves, the panel turns into a recap of the session, with a button to keep it as a mix
 - Search results as a card with covers: choose one, then Play now, Play next or Add to queue
 - A queue card where you can pick any song to play now, move up or remove
-- Follows you between voice channels; leaves a minute after you do, or stays around the clock with 24/7 mode
+- Follows you between voice channels; leaves a minute after you do, or stays around the clock with 24/7 mode, playing even to an empty room
 - `/settings` in Discord for the panel channel, a compact panel, leaving, 24/7, crossfade, audio quality, timezone and song requests
+- Make it your own with `/customize`: the bot's name, picture, banner and About me, everywhere or just in one server
+- An interactive `/help`: a page per topic, clickable commands, buttons that do the thing, and a search for what you'd like to do
+- Voice commands (beta): say "Loski, skip" or "Loski, play …" in the call, understood on your own computer and only for people who said yes
 - My sound: your own five-band EQ, next to the sound filters
 - Remembers your volume and crossfade settings; keeps a listening history you can replay from (`/history`)
 - Listening stats as a picture: time, top songs, artists and genres, streaks and a daily chart (`/stats`), who you listen with, a recap in your DMs on the 1st of each month, and Loski Wrapped on January 1st (`/wrapped`)
 - A Blend mix every Monday: your top songs woven with what friends liked or asked for
 - Small DMs for milestones: 100 hours with Loski, your 1,000th song, 30 days in a row
 - Saved mixes: keep a queue under a name, load, rename or delete it later (`/mix`, or "Save as mix" on the queue card)
-- Song requests: anyone in the server can `/request` a song; waiting requests gather on one card
+- Song requests: anyone in the server can `/request` a song; waiting requests gather on one card, or in party mode the call votes and the top request plays next
 - Friends: co-DJs by name or with a DJ role, a ♥ on the panel for everyone in the call, votes to skip, and who's listening
 - Smart shuffle: songs by the same artist don't play back to back
 - Queue tools: remove a run of songs, drop repeats (`/dedupe`), move a song to play next
@@ -51,7 +54,7 @@ A private Discord music bot that streams **real Spotify audio** (your Premium ac
 
 ## Setup
 
-You need Docker (Docker Desktop on Windows and macOS) and Spotify Premium.
+You need Docker (Docker Desktop on Windows and macOS) and Spotify Premium. This is the quick way, on your own computer; a server or VPS, a Raspberry Pi, a NAS, plain Docker and building it yourself are in [INSTALLATION.md](INSTALLATION.md).
 
 ### 1. Start it
 
@@ -61,7 +64,7 @@ On Windows, double-click `loski.cmd`, or run it from a terminal in the repo fold
 .\loski start
 ```
 
-On Linux or macOS (see [Linux, macOS and Raspberry Pi](#linux-macos-and-raspberry-pi)):
+On Linux or macOS (more in [INSTALLATION.md](INSTALLATION.md#linux)):
 
 ```bash
 ./loski.sh start
@@ -73,7 +76,7 @@ It starts Docker if it isn't running, downloads the ready-made Loski image the f
 
 The first time, your browser opens **http://127.0.0.1:5588**, which asks for three keys and shows where to get each one:
 
-1. **A Discord bot.** At [discord.com/developers/applications](https://discord.com/developers/applications), click **New Application**, name it **Loski**, open **Bot**, click **Reset Token** and copy the token.
+1. **A Discord bot.** At [discord.com/developers/applications](https://discord.com/developers/applications), click **New Application**, name it what your bot should be called (**Loski**, say; `/customize` changes it later), open **Bot**, click **Reset Token** and copy the token.
 2. **A Spotify app.** At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), click **Create app**, set the redirect URI to exactly `http://127.0.0.1:5588/callback`, tick **Web API**, and copy the **Client ID** and **Client Secret**.
 
 The page checks them with Discord and Spotify and saves them in `data/setup.env`. (You can put them in `.env` yourself instead; `.env` always wins. See `.env.example`.)
@@ -82,7 +85,7 @@ The page checks them with Discord and Spotify and saves them in `data/setup.env`
 
 Once the keys are saved, the same page shows the rest:
 
-1. **Invite Loski** to your server with the button. It asks for View Channels, Send Messages, Embed Links, Read Message History, Connect, Speak and Set Voice Channel Status (for the song under the channel's name). No privileged intents are needed.
+1. **Invite Loski** to your server with the button. It asks for View Channels, Send Messages, Embed Links, Read Message History, Connect, Speak, Set Voice Channel Status (for the song under the channel's name) and Change Nickname (for a nickname of its own, with `/customize`). No privileged intents are needed.
 2. **Make it yours.** Send Loski a direct message saying `claim` and the six-digit code on the page (it's in the log too, and `loski start` prints it). Whoever sends it first becomes the owner, and the code is only on this computer, so nobody else in the server can beat you to it. Setting `OWNER_ID` in `.env` skips this.
 3. **Log in to Spotify**: two quick approvals, one for streaming and one for search, from the page or the buttons in the DM Loski sends you. After that you never need to log in again. The login is stored in `./data`.
 
@@ -105,24 +108,9 @@ Once the keys are saved, the same page shows the rest:
 
 A backup holds your Discord token and Spotify login, so keep it somewhere private; `.gitignore` already keeps it out of the repo.
 
-### Linux, macOS and Raspberry Pi
+### Other ways to run it
 
-`loski.sh` does on Linux and macOS what `loski.cmd` does on Windows. If `./loski.sh` says permission denied, make it runnable once (or run it as `bash loski.sh`):
-
-```bash
-chmod +x loski.sh
-```
-
-- **Docker.** On macOS, `./loski.sh start` opens Docker Desktop if it isn't running. On Linux, install Docker Engine with the Compose plugin ([docs.docker.com/engine/install](https://docs.docker.com/engine/install/)) and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log out and in). The script tells you if either is missing.
-- **Your files stay yours.** On Linux, `loski.sh` has Loski run as your own user, so `data/` belongs to you and backups and restores need no `sudo`. Plain `docker compose up -d` works too; `data/` then belongs to Loski's own user (10001).
-- **Raspberry Pi.** A Pi 4 or 5 on a 64-bit OS runs the ARM image.
-- **On a server, or anywhere without a browser.** The setup page only opens on the computer Loski runs on, so put the three keys in `.env` instead (see `.env.example`), start Loski, and find the claim code in `docker compose logs loski`. For Spotify, press the buttons in the DM Loski sends you, in any browser. Each approval ends on a `127.0.0.1` page that doesn't load, which is expected: copy that page's address and send it to Loski in the same DM. (An SSH tunnel works too: `ssh -L 5588:127.0.0.1:5588 -L 8898:127.0.0.1:8898 you@server`, then open http://127.0.0.1:5588 on your laptop.)
-
-### Moving to another computer
-
-1. On the old one: `loski backup` (or `./loski.sh backup`), then stop Loski there so it isn't logged in twice.
-2. Copy `loski-backup-<date>.tar.gz` into the Loski folder on the new one (clone the repo, or just `docker-compose.yml` and a launcher).
-3. On the new one: `loski restore loski-backup-<date>.tar.gz`. It unpacks everything, keeps whatever was there before, and starts Loski: same history, mixes, settings and Spotify login, no setup page.
+[INSTALLATION.md](INSTALLATION.md) has every way, step by step: Windows, macOS and Linux with the launchers, a server or VPS (with the Spotify login through Discord), a Raspberry Pi, a NAS or Portainer, plain `docker run`, and building it yourself. It also covers updating, backups, moving Loski to another computer, and what to do when something's off.
 
 ### Prebuilt image
 
@@ -173,10 +161,14 @@ Each tag holds two builds, and Docker picks the right one by itself: `linux/amd6
 | `/mix load name [shuffle] [next]` | Add a saved mix to the queue. |
 | `/mix list`, `/mix delete name` | See your mixes (and add one from the menu), or delete one. Up to 25. **Blend** is remade every Monday. |
 | `/status` | Whether Spotify, Discord and the audio are healthy: login, response times, voice server, bitrate, buffer, uptime. |
-| `/request song` | For everyone in the server: ask for a song. Waiting requests gather on one card where you or a co-DJ play them next, add them or decline them. A co-DJ's own requests go straight into the queue. |
+| `/request song` | For everyone in the server: ask for a song. Waiting requests gather on one card where you or a co-DJ play them next, add them or decline them; in party mode, everyone in the call votes and the top request plays next. A co-DJ's own requests go straight into the queue. |
 | `/settings` | Everything you can change without editing `.env`, in one card only you can see. |
+| `/customize` | Make the bot your own: its name, picture, banner and About me, everywhere or in one server. |
+| `/voice` | Voice commands (beta): you turn them on, and everyone says whether Loski may listen to them. |
+| `/join` | Come into your voice channel without playing anything yet (or move to it). |
+| `/24-7 [on]` | Switch 24/7 on or off (leave `on` out to switch it): Loski stays in the call and keeps the music going, even with nobody there. Turned on while you're in a call, it joins you. |
 | `/stop` | Stop, clear the queue and leave. With 24/7 on, Loski stays away until the next `/play`. |
-| `/help` | Everything Loski can do. |
+| `/help` | A guide only you see: a page per topic, with commands you can click to fill in and buttons that do the thing, and **Find a command** for whatever you'd like to do. It only shows what you may use. |
 | Right-click → Apps → Play with Loski / Queue with Loski | Plays the Spotify link in that message, now or at the end of the queue. |
 
 The queue card lets you pick a song to play now, play next, move up or down a step at a time, move to any position, or remove; it also saves the queue as a mix, and offers to remove repeats when there are any. The `/mix list` card does the same for mixes: add one to the queue, play it next, rename or delete it.
@@ -194,8 +186,8 @@ The artwork banner is drawn with the bundled Bricolage Grotesque and Noto Sans f
 `/settings` opens a card only you can see. Every change is saved in `data/preferences.json` and used straight away, no restart:
 
 - **Panel channel.** Pick a channel and the panel always goes there, instead of wherever you last used `/play`. Clear it to go back.
-- **Panel look.** Full, with the artwork and up next, or compact: no artwork, one row of buttons, and the rest (volume, lyrics, shuffle, repeat) in the More menu. Handy on a phone.
-- **24/7.** Loski stays in its voice channel instead of leaving, and comes back to it after a restart or an update. When the queue runs out it keeps going with a Spotify radio from the last song. While nobody's in the channel the music pauses, so it doesn't play to an empty room or count in your stats, and it carries on when someone joins. `/stop` (or Leave on the panel) sends it away until the next `/play`.
+- **Panel look.** Full, with the artwork and up next, in one of three styles: **Glass** (the cover blurred behind a frosted panel), **Vinyl** (the cover as a sleeve with the record sliding out) or **Minimal** (the cover beside a flat colour from it). Or compact: no artwork, one row of buttons, and the rest (volume, lyrics, shuffle, repeat) in the More menu. Handy on a phone.
+- **24/7** (`/24-7`, or in `/settings`). Loski stays in its voice channel instead of leaving, and comes back to it after a restart or an update. The music keeps going whether or not anyone's in the channel: when the queue runs out, a Spotify radio picks up from the last song. Time it plays to an empty room doesn't count in your stats. `/stop` (or Leave on the panel) sends it away until the next `/play`.
 - **Leaving.** How long Loski waits after you leave the call, and after the music ends.
 - **Sound.** Crossfade, volume levelling and the audio quality sent to Discord.
 - **My sound.** Bass, low-mid, mid, high-mid and treble, each from -8 to +8 dB. Turn it on from the card, the panel's More menu or `/filter`.
@@ -203,6 +195,26 @@ The artwork banner is drawn with the bundled Bricolage Grotesque and Noto Sans f
 - **Friends.** Co-DJs, song requests and votes to skip; see below.
 
 The settings in `.env` (`LEAVE_AFTER_SECS`, `IDLE_LEAVE_SECS`, `AUDIO_BITRATE`, `TIMEZONE`, `NORMALISE`) still work as starting values; anything changed in `/settings` wins.
+
+## Make it yours
+
+`/customize` shows the bot's banner, picture, name and About me on a card only you can see. **Edit profile** changes any of them in one form, with the pictures uploaded right there (PNG, JPG, GIF or WebP). Discord allows two name changes an hour.
+
+- **Its name goes everywhere:** its messages, its commands, the right-click entries ("Play with …"), the Spotify app's device list and the corner of the stats pictures.
+- **In one server.** **Edit for this server** gives it a nickname, picture, banner and bio there only; **Same as everywhere** takes them off again.
+- **Back to Loski's own** puts back the name, picture, banner or About me, or all four.
+
+A new bot starts with Loski's own look. Whatever you change, here or in Discord's developer portal, stays as you set it.
+
+## Voice commands (beta)
+
+Talk to Loski in the call: its name first, then what you'd like.
+
+- **Turning them on.** `/voice` → **Turn on** downloads a 60 MB speech model once (whisper.cpp's small English model, from its page on Hugging Face, checked against its fingerprint) into `data/models`, and adds you as the first person Loski listens to. Friends press **Listen to me** in `/voice`; nobody else is listened to.
+- **What to say**, in English: "Loski, pause" (or stop), "resume" (or start), "skip", "go back", "volume 30", "louder", "quieter", "shuffle", "like this", "play Numb by Linkin Park", "leave". With a name of your own from `/customize`, say that name instead.
+- **Same rules as the buttons.** Anyone can say "like this", and "skip" from a listener is their vote to skip. "Play …" needs a co-DJ who may add songs; the rest needs full control. Loski answers in the chat, and when it hears its name but not a command, it says what it heard.
+- **Private.** Loski stops deafening itself in calls while voice commands are on. Short bits of speech are turned into text on the computer Loski runs on and then forgotten; no audio is kept or sent anywhere. During the beta, what's said to Loski goes in its log, so the commands can be tuned; other talk is only counted.
+- **What it needs.** An Intel or AMD processor with AVX2 (most from the last ten years) or a 64-bit ARM one; `/voice` says so if it can't run. Headphones help: music from your speakers into your microphone makes commands harder to pick out.
 
 ## Friends
 
@@ -213,6 +225,7 @@ Nobody but you controls Loski until you say so, in `/settings` → Friends:
 - **Who's listening.** The panel names who's in the call, and the recap says who you listened with and for how long.
 - **Votes to skip.** Anyone in the call who isn't a co-DJ can press Skip to vote; once more than half the call has, the song skips. You can turn it off.
 - **Requests.** `/request` adds to one card with every waiting request, where you or a co-DJ answer them one by one or all at once.
+- **Party mode.** Song requests set to party mode: each request on the card gets a vote button for everyone in the call (asking counts as a vote), and the request with the most votes goes up next by itself, one at a time; on a tie, whoever asked first. You and co-DJs can still answer requests by hand.
 
 Loski leaves a minute after the last person who runs it (you or a co-DJ) leaves the call, unless 24/7 is on.
 
@@ -236,7 +249,7 @@ Loski leaves a minute after the last person who runs it (you or a co-DJ) leaves 
 - **Spotify history and Wrapped.** Songs played through Loski don't count, because librespot doesn't report plays to Spotify. Loski keeps its own history instead.
 - **Leaving.** Loski leaves 1 minute after you leave voice (`LEAVE_AFTER_SECS`), or 5 minutes after the queue runs out (`IDLE_LEAVE_SECS`). The queue isn't saved between sessions.
 - **Other people** can listen, `/request` songs, like and vote to skip. Only the owner (`OWNER_ID`, or whoever claimed Loski) and the co-DJs they pick can use the other commands and buttons. A claimed owner is remembered in `data/owner`; delete it to claim Loski again.
-- **Profile and icons.** On startup Loski sets its own name, avatar, banner and "About me" from `assets/`, and uploads its icons as its own emojis. Art is only re-uploaded when it changes. Set `SYNC_PROFILE=false` to leave the profile alone, or `BOT_NAME` to call it something else.
+- **Profile and icons.** A new bot gets Loski's own picture, banner and "About me", and Loski uploads its icons as its own emojis. What you change with `/customize` or in Discord's developer portal stays. `BOT_NAME` in `.env` names the bot at startup (a name picked in `/customize` wins), and `SYNC_PROFILE=false` leaves the profile alone.
 - **Restarting.** `docker compose down` or a restart makes Loski leave voice and remove its panel first, so it never looks stuck in a channel.
 - **"Ports are not available" on Windows.** Hyper-V now and then reserves a block of ports that includes Loski's login ports (5588 and 8898), and Docker can't start Loski then; `loski start` tells you when that's why. To free them, open PowerShell as administrator and run `net stop winnat; net start winnat` (or restart Windows), then start Loski again.
 
@@ -247,7 +260,7 @@ The project builds inside Docker, so you don't need a local Rust toolchain:
 ```bash
 docker build -t loski-dev - <<'EOF'
 FROM rust:1.99.1-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config libopus-dev && rustup component add clippy rustfmt
+RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config libopus-dev clang libclang-dev && rustup component add clippy rustfmt
 EOF
 docker run --rm -v "$PWD:/src" -v loski-cargo:/usr/local/cargo/registry -v loski-target:/target -e CARGO_TARGET_DIR=/target -w /src loski-dev cargo test
 ```

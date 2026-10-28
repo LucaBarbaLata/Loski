@@ -28,7 +28,7 @@ use super::{
     cards::{self, Btn, color},
     friends::{self, RoomView},
     icons::{Icon, Icons},
-    voice,
+    requests, voice,
 };
 use crate::{
     banner,
@@ -66,6 +66,8 @@ pub(super) type PanelRef = (Id<ChannelMarker>, Id<MessageMarker>);
 pub struct Look {
     /// The slim panel: no artwork, one row of buttons.
     pub compact: bool,
+    /// How the artwork looks, when there is some.
+    pub style: banner::Style,
     /// 24/7 is on, so Loski isn't about to leave when the music ends.
     pub staying: bool,
 }
@@ -204,6 +206,7 @@ async fn on_notice(app: &Arc<App>, core: &Core, notice: Notice) {
             }
             repost(app, core).await;
             voice::show_song(app, Some(&track)).await;
+            requests::party_turn(app).await;
         }
         Notice::Changed => app.ui.mark_dirty(),
         Notice::QueueEnded => {
@@ -212,6 +215,8 @@ async fn on_notice(app: &Arc<App>, core: &Core, notice: Notice) {
             app.set_listening(None);
             voice::show_song(app, None).await;
             voice::queue_ended(app);
+            // Party mode keeps going while requests are waiting.
+            requests::party_turn(app).await;
         }
         Notice::ConnectStarted => voice::join_for_connect(app, core).await,
         Notice::SleepReached => {
@@ -286,7 +291,7 @@ pub async fn repost(app: &App, core: &Core) {
     let snap = core.engine.snapshot();
     let look = app.look();
     let banner = match &snap.track {
-        Some(track) if !look.compact => banner::for_track(&app.web, track).await,
+        Some(track) if !look.compact => banner::for_track(&app.web, track, look.style).await,
         _ => None,
     };
     let attachments: Vec<Attachment> = banner

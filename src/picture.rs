@@ -56,6 +56,8 @@ pub struct Tile {
 pub struct WrappedPicture {
     /// "LOSKI WRAPPED · 2026"
     pub kicker: String,
+    /// The bot's name in the corner, from `signature`.
+    pub mark: String,
     /// "41,230 minutes"
     pub headline: String,
     pub subline: String,
@@ -67,6 +69,8 @@ pub struct WrappedPicture {
 pub struct StatsPicture {
     /// "OCTOBER SO FAR"
     pub kicker: String,
+    /// The bot's name in the corner, from `signature`.
+    pub mark: String,
     /// "31h 12m"
     pub headline: String,
     /// "of music · 412 plays · 96 songs · 41 artists"
@@ -172,11 +176,23 @@ fn backdrop(cover: Option<&RgbImage>, panels: &[Rect]) -> Canvas {
     canvas
 }
 
-/// "LOSKI" in the bottom right corner.
-fn sign(canvas: &mut Canvas) {
-    let mark = kicker_pen(0.45);
-    let mark_width = banner::text_width(mark.font, mark.size, "LOSKI", mark.tracking);
-    canvas.text(&mark, "LOSKI", RIGHT_END - mark_width, 664.0);
+/// How the pictures sign the bot's name: in capitals, or LOSKI when the
+/// font can't draw it.
+pub fn signature(name: &str) -> String {
+    let upper = name.trim().to_uppercase();
+    if !upper.is_empty() && banner::covers(kicker_pen(1.0).font, &upper) {
+        upper
+    } else {
+        "LOSKI".to_string()
+    }
+}
+
+/// The bot's name in the bottom right corner.
+fn sign(canvas: &mut Canvas, mark: &str) {
+    let pen = kicker_pen(0.45);
+    let mark = banner::ellipsize(pen.font, pen.size, mark, 360.0);
+    let width = banner::text_width(pen.font, pen.size, &mark, pen.tracking);
+    canvas.text(&pen, &mark, RIGHT_END - width, 664.0);
 }
 
 pub fn render(picture: &StatsPicture) -> Vec<u8> {
@@ -205,7 +221,7 @@ pub fn render(picture: &StatsPicture) -> Vec<u8> {
     draw_summary(&mut canvas, picture);
     draw_chart(&mut canvas, &picture.bars, accent);
     draw_lists(&mut canvas, picture, accent);
-    sign(&mut canvas);
+    sign(&mut canvas, &picture.mark);
     canvas.into_jpeg()
 }
 
@@ -277,7 +293,7 @@ pub fn render_wrapped(picture: &WrappedPicture) -> Vec<u8> {
         let detail = banner::ellipsize(detail_pen.font, detail_pen.size, &detail, room);
         canvas.text(&detail_pen, &detail, text_x, rect.y + 128.0);
     }
-    sign(&mut canvas);
+    sign(&mut canvas, &picture.mark);
     canvas.into_jpeg()
 }
 
@@ -465,6 +481,7 @@ mod tests {
     fn sample(days: usize, with_covers: bool) -> StatsPicture {
         StatsPicture {
             kicker: "OCTOBER SO FAR".into(),
+            mark: "LOSKI".into(),
             headline: "31h 12m".into(),
             subline: "of music · 412 plays · 96 songs · 41 artists".into(),
             chips: vec![
@@ -513,11 +530,26 @@ mod tests {
     }
 
     #[test]
+    fn signs_with_the_bot_name() {
+        assert_eq!(signature("DJ Bob"), "DJ BOB");
+        assert_eq!(signature("  "), "LOSKI");
+        // Names the font can't draw keep Loski's.
+        assert_eq!(signature("夜に駆ける"), "LOSKI");
+    }
+
+    #[test]
     fn draws_a_picture_of_the_right_size() {
         for (name, picture) in [
             ("month", sample(21, true)),
             ("week", sample(7, false)),
             ("one", sample(1, true)),
+            (
+                "named",
+                StatsPicture {
+                    mark: signature("Thirty Two Characters Long Name!"),
+                    ..sample(21, true)
+                },
+            ),
         ] {
             let jpeg = render(&picture);
             let img = image::load_from_memory(&jpeg).unwrap();
@@ -568,6 +600,7 @@ mod tests {
         ] {
             let jpeg = render_wrapped(&WrappedPicture {
                 kicker: "LOSKI WRAPPED · 2026".into(),
+                mark: "LOSKI".into(),
                 headline: "41,230 minutes".into(),
                 subline: "of music · 9,812 plays · 1,204 songs · 380 artists".into(),
                 tiles,
@@ -664,6 +697,7 @@ mod tests {
                 duration_ms: 200_000,
                 explicit: false,
             },
+            crate::banner::Style::Glass,
         )
         .expect("banner");
         std::fs::write(format!("{dir}/banner.jpg"), banner).unwrap();
@@ -674,6 +708,7 @@ mod tests {
         ];
         let stats = StatsPicture {
             kicker: "OCTOBER SO FAR".into(),
+            mark: "LOSKI".into(),
             headline: "31h 12m".into(),
             subline: "of music · 412 plays · 96 songs · 41 artists".into(),
             chips: vec![
@@ -727,6 +762,7 @@ mod tests {
         };
         let wrapped = WrappedPicture {
             kicker: "LOSKI WRAPPED · 2026".into(),
+            mark: "LOSKI".into(),
             headline: "41,230 minutes".into(),
             subline: "of music · 9,812 plays · 1,204 songs · 380 artists".into(),
             tiles: vec![

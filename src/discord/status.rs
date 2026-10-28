@@ -122,7 +122,7 @@ async fn gather(app: &App) -> Report {
         uptime: app.started.elapsed(),
         memory_mb: memory_mb(),
         timezone: app.timezone().name().to_string(),
-        device_name: app.cfg.bot_name.clone(),
+        device_name: app.name(),
         newer: updates::newer_release(app).map(|r| r.version().to_string()),
     }
 }

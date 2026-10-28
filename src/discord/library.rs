@@ -34,9 +34,6 @@ use crate::{
     util::escape_md,
 };
 
-pub const PLAY_WITH: &str = "Play with Loski";
-pub const QUEUE_WITH: &str = "Queue with Loski";
-
 #[derive(CommandModel, CreateCommand)]
 #[command(
     name = "radio",
@@ -87,11 +84,32 @@ pub struct PlaylistComplete {
     name: AutocompleteValue<String>,
 }
 
-/// The right-click (Apps) entries on messages.
-pub fn message_commands() -> Vec<Command> {
+/// The right-click (Apps) entries on messages: "Play with Loski" and
+/// "Queue with Loski", by the bot's name when Discord allows it there.
+pub fn menu_names(bot: &str) -> (String, String) {
+    let queue = format!("Queue with {bot}");
+    // Entry names take letters, digits, spaces, - and _, 32 at most.
+    let fits = bot
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        && queue.chars().count() <= 32;
+    if fits {
+        (format!("Play with {bot}"), queue)
+    } else {
+        ("Play now".to_string(), "Add to queue".to_string())
+    }
+}
+
+/// Whether a right-click entry adds to the queue (rather than playing now).
+pub fn is_queue_menu(command: &str) -> bool {
+    command.starts_with("Queue with ") || command == "Add to queue"
+}
+
+pub fn message_commands(bot: &str) -> Vec<Command> {
+    let (play, queue) = menu_names(bot);
     vec![
-        CommandBuilder::new(PLAY_WITH, "", CommandType::Message).build(),
-        CommandBuilder::new(QUEUE_WITH, "", CommandType::Message).build(),
+        CommandBuilder::new(play, "", CommandType::Message).build(),
+        CommandBuilder::new(queue, "", CommandType::Message).build(),
     ]
 }
 
@@ -439,10 +457,10 @@ pub async fn message_command(ix: &Ix, data: CommandData) -> Result<()> {
         .await
         .map_err(|e| oops(format!("Hmm, {e}")))?
         .ok_or_else(|| oops("That link doesn't point to a song, album, playlist or artist."))?;
-    let placement = if data.name == PLAY_WITH {
-        Placement::Now
-    } else {
+    let placement = if is_queue_menu(&data.name) {
         Placement::End
+    } else {
+        Placement::Now
     };
     let note = resolved
         .truncated

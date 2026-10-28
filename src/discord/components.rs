@@ -11,7 +11,9 @@ use twilight_model::{
 use super::{
     App, Core, ERROR_SECS, LONG_SECS, SHORT_SECS, cards,
     commands::{self, Placement},
+    customize,
     friends::{self, Access},
+    hearing, help,
     interact::Ix,
     library, lyrics, mixes, oops, panel, recap, requests, settings, sound, stats, voice,
 };
@@ -56,6 +58,12 @@ pub async fn handle(app: Arc<App>, interaction: Interaction) {
         settings::change(&ix, key, value).await
     } else if let Some(key) = id.strip_prefix("loski:friends:") {
         friends::change(&ix, key, &data.values).await
+    } else if let Some(key) = id.strip_prefix("loski:me:") {
+        customize::change(&ix, key, value).await
+    } else if let Some(key) = id.strip_prefix("loski:help:") {
+        help::change(&ix, key, value).await
+    } else if let Some(key) = id.strip_prefix("loski:voice:") {
+        hearing::change(&ix, key).await
     } else if id.starts_with("loski:") {
         match ix.app.core.get().cloned() {
             Some(core) => loski(&ix, &core, id, value, message_id).await,
@@ -526,6 +534,9 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
         "loski:m:qsave" => save_queue_form(&ix, &text("name")).await,
         "loski:m:recapsave" => recap::save_mix(&ix, &text("name")).await,
         "loski:m:tz" => settings::set_timezone(&ix, &text("tz")).await,
+        "loski:m:me" => customize::edited(&ix, &data).await,
+        "loski:m:here" => customize::edited_here(&ix, &data).await,
+        "loski:m:helpfind" => help::found(&ix, &text("what")).await,
         id => {
             if let Some(old) = id.strip_prefix("loski:m:mixren:") {
                 mixes::rename(&ix, old, &text("name")).await
@@ -542,7 +553,7 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
 }
 
 /// The text typed into a form's field, wherever the field sits.
-fn field(components: &[ModalInteractionComponent], id: &str) -> Option<String> {
+pub(super) fn field(components: &[ModalInteractionComponent], id: &str) -> Option<String> {
     components.iter().find_map(|component| match component {
         ModalInteractionComponent::TextInput(input) if input.custom_id == id => {
             Some(input.value.trim().to_string())

@@ -122,7 +122,7 @@ function Wait-Ready([datetime]$Since) {
             return $true
         }
         if ($log -match 'Spotify login needed') {
-            Write-Problem "Spotify needs you to log in once: open $SetupPage in your browser."
+            Write-Problem "Spotify needs you to log in once: open $SetupPage in your browser, or use the buttons in the DM Loski sent you."
             Show-Claim $log
             return $true
         }

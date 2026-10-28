@@ -15,7 +15,9 @@ twilight-model = "0.17.1"
 twilight-cache-inmemory = "0.17.1"
 twilight-interactions = "0.17.1"
 twilight-util = { version = "0.17.0", features = ["builder"] }
-songbird = { version = "0.6.1", default-features = false, features = ["driver", "gateway", "rustls", "twilight", "tungstenite"] }
+songbird = { version = "0.6.1", default-features = false, features = ["driver", "gateway", "receive", "rustls", "twilight", "tungstenite"] }
+# Speech to text for voice commands, on this computer (see src/speech.rs).
+whisper-rs = "0.16"
 symphonia-core = "0.5"
 # songbird decodes our raw f32 stream with symphonia's PCM codec, which is
 # only compiled in when this feature is enabled somewhere in the build.
@@ -55,6 +57,10 @@ chrono-tz = "0.10.4"
 [target.'cfg(unix)'.dependencies]
 # Switching from root to Loski's own user at start (see src/user.rs).
 libc = "0.2"
+
+# The speech model is far too slow unoptimised, even for tests.
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

@@ -123,6 +123,15 @@ impl Ix {
         Ok(())
     }
 
+    /// For a button or form whose work takes a while: Discord keeps
+    /// waiting, and `update_message` fills in the card when it's done.
+    pub async fn defer_update(&self) -> Result<()> {
+        self.respond(InteractionResponseType::DeferredUpdateMessage, None)
+            .await?;
+        *self.state.lock() = State::Deferred;
+        Ok(())
+    }
+
     pub async fn defer_ephemeral(&self) -> Result<()> {
         let data = InteractionResponseDataBuilder::new()
             .flags(MessageFlags::EPHEMERAL)
@@ -185,6 +194,15 @@ impl Ix {
 
     /// Replaces the message a button or menu was on.
     pub async fn update_message(&self, components: Vec<Component>) -> Result<()> {
+        if *self.state.lock() == State::Deferred {
+            self.client()
+                .update_response(&self.token)
+                .flags(cards::V2)
+                .components(Some(&components))
+                .await?;
+            *self.state.lock() = State::Replied;
+            return Ok(());
+        }
         let data = InteractionResponseDataBuilder::new()
             .flags(cards::V2)
             .components(components)
@@ -192,6 +210,17 @@ impl Ix {
         self.respond(InteractionResponseType::UpdateMessage, Some(data))
             .await?;
         *self.state.lock() = State::Replied;
+        Ok(())
+    }
+
+    /// Changes what this interaction already showed (its reply, or the card
+    /// its button is on), after the first answer.
+    pub async fn edit(&self, components: Vec<Component>) -> Result<()> {
+        self.client()
+            .update_response(&self.token)
+            .flags(cards::V2)
+            .components(Some(&components))
+            .await?;
         Ok(())
     }
 

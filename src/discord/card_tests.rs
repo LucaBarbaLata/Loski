@@ -170,10 +170,12 @@ fn looks() -> [panel::Look; 3] {
         panel::Look {
             compact: true,
             staying: false,
+            ..Default::default()
         },
         panel::Look {
             compact: true,
             staying: true,
+            ..Default::default()
         },
     ]
 }
@@ -193,6 +195,11 @@ fn settings_and_my_sound_cards_are_valid() {
             let view = settings::SettingsView {
                 panel_channel: always_on.then_some(channel),
                 compact: always_on,
+                style: if crossfade == 5 {
+                    crate::banner::Style::Vinyl
+                } else {
+                    crate::banner::Style::Minimal
+                },
                 always_on,
                 staying_in: always_on.then_some(channel),
                 leave_after: Duration::from_secs(leave),
@@ -324,16 +331,54 @@ fn search_picker_is_valid() {
 
 #[test]
 fn help_card_is_valid() {
-    assert_valid(commands::help_card(&Icons::default()));
+    use super::{
+        friends::Access,
+        help::{HelpView, Mentions, Topic, found_card, home_card, topic_card},
+    };
+    let icons = Icons::default();
+    let ids = commands::definitions("Loski")
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| (c.name, twilight_model::id::Id::new(1_000_000 + i as u64)))
+        .collect();
+    let mut mentions = Some(Mentions::new(ids));
+    for access in [Access::Listener, Access::Queue, Access::Full, Access::Owner] {
+        for in_server in [true, false] {
+            for bot in ["Loski", "DJ ✨ Bob", "Thirty Two Characters Long Name!"] {
+                let view = HelpView {
+                    bot: bot.to_string(),
+                    access,
+                    in_server,
+                    mentions: mentions.take().unwrap_or_default(),
+                };
+                assert_valid(home_card(&icons, &view));
+                for topic in Topic::ALL {
+                    assert_valid(topic_card(&icons, &view, topic));
+                }
+                for query in ["skip a few songs", "zzz", &"a very long query ".repeat(10)] {
+                    assert_valid(found_card(&icons, &view, query));
+                }
+            }
+        }
+    }
 }
 
 #[test]
 fn command_definitions_are_valid() {
-    let definitions = commands::definitions();
-    assert_eq!(definitions.len(), 36);
-    for command in &definitions {
-        if let Err(e) = twilight_validate::command::command(command) {
-            panic!("/{} is invalid: {e}", command.name);
+    // Any name Discord allows a bot: long ones, emoji, dots.
+    for bot in [
+        "Loski",
+        "DJ Bob",
+        "DJ ✨ Bob",
+        "Bob.exe",
+        "Thirty Two Characters Long Name!",
+    ] {
+        let definitions = commands::definitions(bot);
+        assert_eq!(definitions.len(), 40);
+        for command in &definitions {
+            if let Err(e) = twilight_validate::command::command(command) {
+                panic!("/{} is invalid for {bot}: {e}", command.name);
+            }
         }
     }
 }
@@ -420,7 +465,7 @@ fn stats_cards_are_valid() {
     ] {
         for so_far in [false, true] {
             assert_valid(stats::wrapped_card(
-                &icons, &year, 2026, so_far, pictures, name,
+                &icons, "Loski", &year, 2026, so_far, pictures, name,
             ));
         }
     }
@@ -559,11 +604,19 @@ fn requests_card_is_valid() {
                 by_id: n as u64,
                 asked_at: 1_760_000_000,
                 at: std::time::Instant::now(),
+                votes: (0..n as u64 % 4).collect(),
             })
             .collect();
         for count in [1, 2, 6, 7, 30] {
-            assert_valid(requests_card(&icons, &open[..count], None));
-            assert_valid(requests_card(&icons, &open[..count], Some(open[0].nonce)));
+            for party in [false, true] {
+                assert_valid(requests_card(&icons, &open[..count], None, party));
+                assert_valid(requests_card(
+                    &icons,
+                    &open[..count],
+                    Some(open[0].nonce),
+                    party,
+                ));
+            }
         }
     }
 }
@@ -656,6 +709,97 @@ fn login_card_is_valid() {
     ] {
         for intro in [FIRST, AGAIN] {
             assert_valid(login_card(intro, "http://127.0.0.1:5588/", &links));
+        }
+    }
+}
+
+#[test]
+fn customize_card_is_valid() {
+    use super::customize::{HereView, ProfileView, customize_card};
+    let icons = Icons::default();
+    let view = |banner: bool, here: Option<HereView>, long: bool| ProfileView {
+        name: if long {
+            "Thirty Two Characters Long Name!"
+        } else {
+            "Loski"
+        }
+        .to_string(),
+        about: if long {
+            "*About* me ".repeat(60)
+        } else {
+            String::new()
+        },
+        picture: "https://cdn.discordapp.com/avatars/1/abc.png?size=256".to_string(),
+        banner: banner
+            .then(|| "https://cdn.discordapp.com/banners/1/abc.png?size=1024".to_string()),
+        default_name: "Loski".to_string(),
+        here,
+    };
+    let dressed = || HereView {
+        nick: Some("DJ *Bob*".to_string()),
+        picture: true,
+        banner: true,
+    };
+    for long in [false, true] {
+        for banner in [false, true] {
+            assert_valid(customize_card(&icons, &view(banner, None, long)));
+            assert_valid(customize_card(
+                &icons,
+                &view(banner, Some(HereView::default()), long),
+            ));
+            assert_valid(customize_card(&icons, &view(banner, Some(dressed()), long)));
+        }
+    }
+}
+
+#[test]
+fn party_mode_plays_the_most_voted_first() {
+    use super::requests::{Request, party_order};
+    let request = |n: u8, votes: &[u64]| Request {
+        nonce: n as u64,
+        track: (*track(n, false)).clone(),
+        by: "Ana".to_string(),
+        by_id: 1,
+        asked_at: 1_760_000_000,
+        at: std::time::Instant::now(),
+        votes: votes.iter().copied().collect(),
+    };
+    // Asked in order 0, 1, 2, 3.
+    let open = [
+        request(0, &[1]),
+        request(1, &[1, 2, 3]),
+        request(2, &[1]),
+        request(3, &[1, 2, 3]),
+    ];
+    let order: Vec<u64> = party_order(&open).iter().map(|r| r.nonce).collect();
+    assert_eq!(order, [1, 3, 0, 2]);
+}
+
+#[test]
+fn voice_card_is_valid() {
+    use super::hearing::{VoiceView, voice_card};
+    let icons = Icons::default();
+    for owner in [false, true] {
+        for (on, busy, cpu_ok) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            for me in [false, true] {
+                for heard_here in [Vec::new(), vec!["Luca".to_string(), "David *DJ*".repeat(9)]] {
+                    let view = VoiceView {
+                        bot: "Thirty Two Characters Long Name!".to_string(),
+                        owner,
+                        on,
+                        busy,
+                        cpu_ok,
+                        me,
+                        heard_here,
+                    };
+                    assert_valid(voice_card(&icons, &view));
+                }
+            }
         }
     }
 }

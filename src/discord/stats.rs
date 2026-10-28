@@ -260,6 +260,7 @@ async fn picture(app: &App, stats: &Stats) -> Option<Vec<u8>> {
 
     let picture = StatsPicture {
         kicker: kicker(stats),
+        mark: picture::signature(&app.name()),
         headline: short_duration(stats.listened_ms),
         subline: format!(
             "of music · {} · {} · {}",
@@ -715,7 +716,8 @@ async fn wrapped_picture(app: &App, stats: &Stats, year: i32) -> Option<Vec<u8>>
     )
     .await;
     let picture = WrappedPicture {
-        kicker: format!("LOSKI WRAPPED · {year}"),
+        kicker: format!("{} WRAPPED · {year}", picture::signature(&app.name())),
+        mark: picture::signature(&app.name()),
         headline: format!("{} minutes", thousands(stats.listened_ms / 60_000)),
         subline: format!(
             "of music · {} · {} · {}",
@@ -736,6 +738,7 @@ async fn wrapped_picture(app: &App, stats: &Stats, year: i32) -> Option<Vec<u8>>
 /// addresses (highlights, then the year).
 pub fn wrapped_card(
     icons: &Icons,
+    bot: &str,
     stats: &Stats,
     year: i32,
     so_far: bool,
@@ -743,8 +746,9 @@ pub fn wrapped_card(
     name: impl Fn(u64) -> String,
 ) -> Component {
     let mut parts = vec![cards::text(format!(
-        "{} **Loski Wrapped {year}**\nYour year in music{}.",
+        "{} **{} Wrapped {year}**\nYour year in music{}.",
         icons.md(Icon::Stats),
+        escape_md(bot),
         if so_far {
             " so far"
         } else {
@@ -805,7 +809,7 @@ async fn wrapped_message(app: &App, year: i32) -> Option<(Component, Vec<Attachm
     }
     let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
     let so_far = year >= now(app).year();
-    let card = wrapped_card(&app.icons, &stats, year, so_far, &urls, |id| {
+    let card = wrapped_card(&app.icons, &app.name(), &stats, year, so_far, &urls, |id| {
         friend_name(app, id)
     });
     Some((card, files))

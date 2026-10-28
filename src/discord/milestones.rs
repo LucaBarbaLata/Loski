@@ -107,10 +107,11 @@ async fn celebrate(app: &App) {
     }
     let top = stats.top_songs.first();
     let since = stats.first_day.format("%B %-d, %Y");
+    let bot = escape_md(&app.name());
     let mut notes = Vec::new();
     if new.hours > 0 {
         let mut text = format!(
-            "🎉 **{} hours with Loski.** That's {} songs since {since}.",
+            "🎉 **{} hours with {bot}.** That's {} songs since {since}.",
             thousands(new.hours),
             thousands(stats.plays as u64)
         );
@@ -127,12 +128,12 @@ async fn celebrate(app: &App) {
         let latest = app.store.recent_history(1).into_iter().next();
         let text = match &latest {
             Some(song) => format!(
-                "🎉 **Your {}th song with Loski** was **{}** by {}.",
+                "🎉 **Your {}th song with {bot}** was **{}** by {}.",
                 thousands(new.songs),
                 escape_md(&truncate(&song.title, 80)),
                 escape_md(&truncate(&song.artists, 60))
             ),
-            None => format!("🎉 **{} songs with Loski.**", thousands(new.songs)),
+            None => format!("🎉 **{} songs with {bot}.**", thousands(new.songs)),
         };
         notes.push((text, latest.and_then(|s| s.cover)));
     }

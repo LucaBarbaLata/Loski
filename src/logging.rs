@@ -11,7 +11,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Days of log files kept; older ones are deleted as new days start.
 const KEEP_DAYS: usize = 14;
-const DEFAULT_FILTER: &str = "info,librespot_playback=warn,songbird=warn";
+// songbird warns several times a second about call statistics (RTCP) it
+// can't read while Loski listens in; those don't matter.
+const DEFAULT_FILTER: &str =
+    "info,librespot_playback=warn,songbird=warn,songbird::driver::tasks::udp_rx=error";
 
 /// Starts logging. Keep the guard alive: dropping it flushes the file.
 pub fn init() -> Option<WorkerGuard> {

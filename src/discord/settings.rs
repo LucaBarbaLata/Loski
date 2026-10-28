@@ -25,7 +25,7 @@ use super::{
     interact::Ix,
     oops, panel, sound, voice,
 };
-use crate::{config::AudioBitrate, store::Prefs};
+use crate::{banner::Style, config::AudioBitrate, store::Prefs};
 
 #[derive(CommandModel, CreateCommand)]
 #[command(
@@ -89,6 +89,7 @@ impl App {
         let prefs = self.prefs.lock();
         panel::Look {
             compact: prefs.compact,
+            style: prefs.style,
             staying: prefs.always_on,
         }
     }
@@ -98,6 +99,7 @@ impl App {
 pub struct SettingsView {
     pub panel_channel: Option<Id<ChannelMarker>>,
     pub compact: bool,
+    pub style: Style,
     pub always_on: bool,
     /// The channel 24/7 keeps Loski in right now.
     pub staying_in: Option<Id<ChannelMarker>>,
@@ -116,6 +118,7 @@ impl SettingsView {
         Self {
             panel_channel: prefs.panel_channel.and_then(Id::new_checked),
             compact: prefs.compact,
+            style: prefs.style,
             always_on: prefs.always_on,
             staying_in: prefs
                 .stay_in
@@ -229,9 +232,19 @@ pub fn settings_card(icons: &Icons, view: &SettingsView) -> Component {
             false,
             vec![
                 described(
-                    "Panel: full, with the artwork",
-                    "full",
-                    "The cover banner, up next and two rows of buttons",
+                    "Panel: glass",
+                    "glass",
+                    "The cover blurred behind a frosted panel",
+                ),
+                described(
+                    "Panel: vinyl",
+                    "vinyl",
+                    "The cover as a sleeve, the record sliding out",
+                ),
+                described(
+                    "Panel: minimal",
+                    "minimal",
+                    "The cover beside a flat colour from it",
                 ),
                 described(
                     "Panel: compact, without artwork",
@@ -239,16 +252,20 @@ pub fn settings_card(icons: &Icons, view: &SettingsView) -> Component {
                     "One row of buttons, for busy chats and phones",
                 ),
             ],
-            if view.compact { "compact" } else { "full" },
+            if view.compact {
+                "compact"
+            } else {
+                view.style.key()
+            },
         ),
     ];
 
     let voice_text = match (view.always_on, view.staying_in) {
         (false, _) => "-# VOICE".to_string(),
         (true, Some(channel)) => format!(
-            "-# VOICE\n24/7 keeps me in <#{channel}>. When the queue runs out I keep going with a radio, and I pause while nobody's listening. `/stop` sends me away until the next `/play`."
+            "-# VOICE\n24/7 keeps me in <#{channel}>, playing even when nobody's there. When the queue runs out I keep going with a radio. `/stop` sends me away until the next `/play`."
         ),
-        (true, None) => "-# VOICE\n24/7 is on: I'll stay in the next channel you `/play` in, and keep the music going there.".to_string(),
+        (true, None) => "-# VOICE\n24/7 is on: I'll stay in the next channel you `/join` or `/play` in, and keep the music going there.".to_string(),
     };
     let leave_options = with_current(&LEAVE_AFTER, view.leave_after.as_secs())
         .into_iter()
@@ -423,8 +440,13 @@ pub async fn change(ix: &Ix, key: &str, value: Option<&str>) -> Result<()> {
             repost = app.ui.has_panel();
         }
         "look" => {
-            let compact = value == Some("compact");
-            app.update_prefs(|p| p.compact = compact);
+            let style = value.and_then(Style::from_key);
+            app.update_prefs(|p| {
+                p.compact = style.is_none();
+                if let Some(style) = style {
+                    p.style = style;
+                }
+            });
             repost = app.ui.has_panel();
         }
         "247" => {
@@ -518,7 +540,7 @@ pub async fn set_timezone(ix: &Ix, input: &str) -> Result<()> {
 }
 
 /// Turns 24/7 on or off, remembering the channel Loski is in now.
-fn set_always_on(app: &App, on: bool) {
+pub(super) fn set_always_on(app: &App, on: bool) {
     let here = app.voice.guild().zip(app.voice.channel());
     app.update_prefs(|p| {
         p.always_on = on;

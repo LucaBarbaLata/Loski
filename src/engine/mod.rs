@@ -301,6 +301,8 @@ struct Inner {
     connect_up_next: Vec<Arc<TrackInfo>>,
     /// Friends in the call right now (Discord user ids), for the history.
     audience: Vec<u64>,
+    /// Nobody's in the call: what plays now doesn't count as listened to.
+    alone: bool,
 }
 
 pub struct Engine {
@@ -366,6 +368,7 @@ impl Engine {
                 played: Vec::new(),
                 connect_up_next: Vec::new(),
                 audience: Vec::new(),
+                alone: false,
             }),
             mixer,
         });
@@ -520,6 +523,16 @@ impl Engine {
         g.tick_listen();
         g.audience = friends;
         g.tick_listen();
+    }
+
+    /// Whether anyone's in the call to hear the music, for the history.
+    pub fn set_alone(&self, alone: bool) {
+        let mut g = self.inner.lock();
+        if g.alone != alone {
+            // Time so far counts as it was.
+            g.tick_listen();
+            g.alone = alone;
+        }
     }
 
     /// What played since the last call (or since Loski started).

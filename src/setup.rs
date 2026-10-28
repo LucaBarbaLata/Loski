@@ -25,7 +25,7 @@ const NEEDED: [&str; 3] = [
     "SPOTIFY_CLIENT_SECRET",
 ];
 /// The permissions in the invite link (see the README).
-const PERMISSIONS: &str = "281474979941376";
+pub const PERMISSIONS: &str = "281475047050240";
 
 fn set(key: &str) -> bool {
     std::env::var(key).is_ok_and(|v| !v.trim().is_empty())
@@ -233,7 +233,7 @@ fn form(port: u16, error: Option<&str>, values: &HashMap<String, String>) -> Str
 <p>Two sets of keys, then you're done. They're saved on this computer, in <code>data/{FILE}</code>.</p>
 {error}
 <div class="step"><h2>1. A Discord bot</h2><ol>
-<li>Open <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">discord.com/developers/applications</a> and click <b>New Application</b>. Name it <b>Loski</b>.</li>
+<li>Open <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">discord.com/developers/applications</a> and click <b>New Application</b>. Name it what you'd like your bot to be called (<b>Loski</b>, say). Its name, picture and more can change later, with <code>/customize</code>.</li>
 <li>Open <b>Bot</b>, click <b>Reset Token</b> and copy it.</li></ol></div>
 <div class="step"><h2>2. A Spotify app</h2><ol>
 <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">developer.spotify.com/dashboard</a> and click <b>Create app</b>.</li>

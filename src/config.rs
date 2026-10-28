@@ -25,8 +25,10 @@ pub struct Config {
     pub idle_leave: Duration,
     pub bitrate: AudioBitrate,
     pub normalise: bool,
-    pub bot_name: String,
-    /// Keep the bot's name, avatar and banner in line with the repo.
+    /// A name to give the bot (BOT_NAME). One picked in /customize wins.
+    pub bot_name: Option<String>,
+    /// Give a new bot Loski's own look, and keep it up to date (see
+    /// `discord/profile.rs`).
     pub sync_profile: bool,
     /// Where "today" and "this month" are, for /stats and the monthly recap.
     pub timezone: chrono_tz::Tz,
@@ -80,7 +82,7 @@ impl Config {
             idle_leave: seconds("IDLE_LEAVE_SECS", 300)?,
             bitrate,
             normalise: flag("NORMALISE", true),
-            bot_name: optional("BOT_NAME").unwrap_or_else(|| "Loski".to_string()),
+            bot_name: optional("BOT_NAME"),
             sync_profile: flag("SYNC_PROFILE", true),
             timezone,
             update_check: flag("UPDATE_CHECK", true),

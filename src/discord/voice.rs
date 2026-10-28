@@ -12,7 +12,7 @@ use std::{
 use anyhow::Result;
 use parking_lot::Mutex;
 use songbird::{
-    CoreEvent, Event, EventContext, EventHandler, TrackEvent,
+    Call, CoreEvent, Event, EventContext, EventHandler, TrackEvent,
     driver::Bitrate,
     events::context_data::DisconnectReason,
     input::{Input, RawAdapter},
@@ -28,7 +28,7 @@ use twilight_model::{
     voice::VoiceState as DiscordVoiceState,
 };
 
-use super::{App, Core, SHORT_SECS, cards, friends, library, lyrics, oops, panel, recap};
+use super::{App, Core, SHORT_SECS, cards, friends, hearing, library, lyrics, oops, panel, recap};
 use crate::{
     audio::{CHANNELS, MixReader, SAMPLE_RATE},
     config::AudioBitrate,
@@ -54,8 +54,6 @@ pub struct Voice {
     dropped: Arc<AtomicBool>,
     /// Discord refused the channel status (a missing permission); don't keep asking.
     status_denied: AtomicBool,
-    /// 24/7 paused the music because nobody was left to hear it.
-    room_paused: AtomicBool,
     /// 24/7 is fetching a radio, so voice updates don't start a second one.
     starting_radio: AtomicBool,
 }
@@ -247,24 +245,9 @@ async fn set_status(app: &App, channel: Id<ChannelMarker>, status: &str) {
     }
 }
 
-/// Joins (or rejoins) the channel and makes sure Loski's audio is playing into it.
-async fn connect(
-    app: &App,
-    core: &Core,
-    guild: Id<GuildMarker>,
-    channel: Id<ChannelMarker>,
-) -> Result<()> {
-    let call = app
-        .songbird
-        .join(guild, channel)
-        .await
-        .map_err(|e| oops(format!("I couldn't join your voice channel: {e}")))?;
-    let mut call = call.lock().await;
-    if !call.is_deaf() {
-        let _ = call.deafen(true).await;
-    }
-    call.set_bitrate(bitrate(app, guild));
-    // One watcher per call, however often Loski moves channels.
+/// The call's events, one set per call however often Loski moves channels:
+/// a watcher for dropped connections, and ears (see `hearing.rs`).
+fn set_up_events(app: &App, call: &mut Call) {
     call.remove_all_global_events();
     call.add_global_event(
         Event::Core(CoreEvent::DriverDisconnect),
@@ -273,6 +256,37 @@ async fn connect(
             dropped: app.voice.dropped.clone(),
         },
     );
+    hearing::add_events(call, &app.ears);
+}
+
+/// Voice commands went on or off: the call Loski is in follows.
+pub async fn hearing_changed(app: &App) {
+    let Some(call) = app.voice.guild().and_then(|guild| app.songbird.get(guild)) else {
+        return;
+    };
+    let mut call = call.lock().await;
+    set_up_events(app, &mut call);
+    hearing::set_deaf(&mut call, &app.ears).await;
+}
+
+/// Joins (or rejoins) the channel and makes sure Loski's audio is playing into it.
+async fn connect(
+    app: &App,
+    core: &Core,
+    guild: Id<GuildMarker>,
+    channel: Id<ChannelMarker>,
+) -> Result<()> {
+    // Discord says whose voice is whose as the call connects: the events
+    // go in first, so none of that is missed.
+    set_up_events(app, &mut *app.songbird.get_or_insert(guild).lock().await);
+    let call = app
+        .songbird
+        .join(guild, channel)
+        .await
+        .map_err(|e| oops(format!("I couldn't join your voice channel: {e}")))?;
+    let mut call = call.lock().await;
+    call.set_bitrate(bitrate(app, guild));
+    hearing::set_deaf(&mut call, &app.ears).await;
 
     let alive = match core.engine.output() {
         Some(handle) => handle
@@ -383,7 +397,6 @@ pub async fn leave(app: &Arc<App>, farewell: Option<&str>) {
         (st.guild.take(), st.channel.take())
     };
     let (guild, channel) = guild;
-    app.voice.room_paused.store(false, Ordering::Relaxed);
     // Cleared while Loski is still in the channel, which the status needs.
     if let Some(channel) = channel {
         set_status(app, channel, "").await;
@@ -471,10 +484,10 @@ pub fn queue_ended(app: &Arc<App>) {
     }
 }
 
-/// 24/7: with nothing playing and someone listening, a radio from the
-/// last song keeps the music going.
+/// 24/7: with nothing playing, a radio from the last song keeps the music
+/// going, whether or not anyone's there to hear it.
 async fn keep_going(app: Arc<App>, core: Arc<Core>) {
-    if !app.always_on() || friends::listeners(&app).is_empty() {
+    if !app.always_on() {
         return;
     }
     let snap = core.engine.snapshot();
@@ -492,22 +505,13 @@ async fn keep_going(app: Arc<App>, core: Arc<Core>) {
     }
 }
 
-/// 24/7: the music pauses while nobody's there to hear it (so it doesn't
-/// count in your stats), and carries on, or starts again, when someone joins.
+/// 24/7: the music plays on with or without anyone in the call (time
+/// alone doesn't count in your stats), and starts again if it stopped.
 async fn check_room(app: &Arc<App>, core: &Arc<Core>) {
     if app.voice.channel().is_none() {
         return;
     }
-    if friends::listeners(app).is_empty() {
-        if core.engine.pause() {
-            app.voice.room_paused.store(true, Ordering::Relaxed);
-            tracing::info!("24/7: nobody's listening, paused until someone joins");
-        }
-    } else if app.voice.room_paused.swap(false, Ordering::Relaxed) {
-        core.engine.resume();
-    } else {
-        keep_going(app.clone(), core.clone()).await;
-    }
+    keep_going(app.clone(), core.clone()).await;
 }
 
 /// 24/7 was switched on or off in /settings.
@@ -595,7 +599,7 @@ pub async fn on_voice_state(app: &Arc<App>, state: &DiscordVoiceState) {
     }
     friends::people_changed(app);
     if app.always_on() {
-        // 24/7 pauses for an empty room and carries on after.
+        // 24/7 keeps the music going, whoever's there.
         if let Some(core) = app.core.get() {
             check_room(app, core).await;
         }

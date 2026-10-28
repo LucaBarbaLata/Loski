@@ -43,6 +43,19 @@ impl Engine {
         g.connect = None;
     }
 
+    /// Restarts the Connect device so the Spotify app lists it under the
+    /// bot's new name. Not while the app is playing through it: then the
+    /// name changes the next time the device restarts.
+    pub fn restart_connect(&self) {
+        let g = self.inner.lock();
+        if matches!(g.mode, Mode::Connect { .. }) {
+            return;
+        }
+        if let Some(connect) = &g.connect {
+            let _ = connect.spirc.shutdown();
+        }
+    }
+
     /// Pauses Spotify Connect playback, e.g. when there's no voice channel to play into.
     pub fn connect_pause(&self) {
         if let Some(spirc) = self.inner.lock().connect_spirc() {

@@ -128,7 +128,7 @@ wait_ready() {
         log="$(docker logs --since "$(($(date +%s) - since + 5))s" "$CONTAINER" 2>&1)"
         if printf '%s' "$log" | grep -q 'Setup needed'; then
             step "Loski needs its Discord token and Spotify keys: open $SETUP_PAGE"
-            open_thing "$SETUP_PAGE" || done_ "(On a computer without a browser, see \"Running on a server\" in the README.)"
+            open_thing "$SETUP_PAGE" || done_ "(On a computer without a browser, see \"A server or VPS\" in INSTALLATION.md.)"
             done_ 'Fill in the page; Loski carries on by itself once they check out.'
             return 0
         fi
@@ -138,7 +138,7 @@ wait_ready() {
             return 0
         fi
         if printf '%s' "$log" | grep -q 'Spotify login needed'; then
-            problem "Spotify needs you to log in once: open $SETUP_PAGE in your browser."
+            problem "Spotify needs you to log in once: open $SETUP_PAGE in your browser, or use the buttons in the DM Loski sent you."
             show_claim "$log"
             return 0
         fi

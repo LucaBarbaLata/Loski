@@ -1,9 +1,13 @@
 //! Song requests: anyone in the server can `/request` a song. Waiting
 //! requests gather on one card, where you (or a co-DJ) play them next, add
 //! them to the queue or decline them. A co-DJ's own requests go straight in.
+//!
+//! Party mode: everyone in the call votes on the waiting requests, and the
+//! one with the most votes goes up next, one at a time, by itself.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -25,7 +29,7 @@ use super::{
     App, SHORT_SECS,
     cards::{self, Btn, color},
     commands::{self, Placement},
-    friends::Access,
+    friends::{self, Access},
     icons::{Icon, Icons},
     interact::Ix,
     oops,
@@ -74,6 +78,8 @@ pub struct Request {
     /// When it was asked, as a Unix timestamp (for the card).
     pub asked_at: i64,
     pub at: Instant,
+    /// Who voted for it in party mode, starting with whoever asked.
+    pub votes: HashSet<u64>,
 }
 
 #[derive(Default)]
@@ -108,6 +114,19 @@ impl State {
         let index = self.open.iter().position(|r| r.nonce == nonce)?;
         Some(self.open.remove(index))
     }
+
+    /// The request with the most votes; on a tie, the one asked first.
+    fn top(&self) -> Option<u64> {
+        party_order(&self.open).first().map(|r| r.nonce)
+    }
+}
+
+/// Requests as party mode ranks them: most votes first, then oldest.
+pub(super) fn party_order(open: &[Request]) -> Vec<&Request> {
+    let mut ranked: Vec<&Request> = open.iter().collect();
+    // A stable sort keeps the order they were asked in among equals.
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.votes.len()));
+    ranked
 }
 
 /// Search suggestions while typing. Unlike `/play`, an empty box suggests
@@ -175,10 +194,16 @@ pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
     }
     ix.defer().await?;
     let track = find_song(app, &cmd.song).await?;
+    let party = app.prefs().party;
     let text = format!(
-        "Asked for **{}** by {}. It's on the requests card now.",
+        "Asked for **{}** by {}. {}",
         escape_md(&truncate(&track.title, 80)),
-        escape_md(&truncate(&track.artists_joined(), 60))
+        escape_md(&truncate(&track.artists_joined(), 60)),
+        if party {
+            "It's on the requests card now: the call votes on what plays next."
+        } else {
+            "It's on the requests card now."
+        }
     );
     let cover = track.cover_thumb_url.clone();
     {
@@ -191,35 +216,65 @@ pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
             by_id,
             asked_at: now_unix(),
             at: Instant::now(),
+            votes: HashSet::from([by_id]),
         });
     }
     let card = cards::toast(&app.icons, &text, cover.as_deref(), color::SUCCESS);
     ix.reply_temp(vec![card], SHORT_SECS).await?;
     redraw(app, ix.channel_id).await;
+    if party {
+        party_turn(app).await;
+    }
     Ok(())
 }
 
 /// Every waiting request on one card. `picked` shows that one's buttons.
-pub fn requests_card(icons: &Icons, open: &[Request], picked: Option<u64>) -> Component {
+/// In `party` mode each has a vote button, most votes first.
+pub fn requests_card(
+    icons: &Icons,
+    open: &[Request],
+    picked: Option<u64>,
+    party: bool,
+) -> Component {
     let waiting = match open.len() {
         1 => "1 WAITING".to_string(),
         n => format!("{n} WAITING"),
     };
-    let mut parts = vec![cards::text(format!("-# SONG REQUESTS · {waiting}"))];
-    for request in open.iter().take(SHOWN) {
+    let mut parts = if party {
+        vec![cards::text(format!(
+            "-# SONG REQUESTS · PARTY MODE · {waiting}\nVote for what you'd like to hear: the request with the most votes plays next."
+        ))]
+    } else {
+        vec![cards::text(format!("-# SONG REQUESTS · {waiting}"))]
+    };
+    let shown: Vec<&Request> = if party {
+        party_order(open)
+    } else {
+        open.iter().collect()
+    };
+    for request in shown.into_iter().take(SHOWN) {
         let track = &request.track;
-        parts.push(cards::text_with_cover(
-            format!(
-                "[**{}**]({}) · {} · `{}`\n-# from **{}** <t:{}:R>",
-                escape_md(&truncate(&track.title, 70)),
-                track.url(),
-                escape_md(&truncate(&track.artists_joined(), 50)),
-                fmt_ms(track.duration_ms as u64),
-                escape_md(&truncate(&request.by, 32)),
-                request.asked_at
-            ),
-            track.cover_thumb_url.as_deref(),
-        ));
+        let text = format!(
+            "[**{}**]({}) · {} · `{}`\n-# from **{}** <t:{}:R>",
+            escape_md(&truncate(&track.title, 70)),
+            track.url(),
+            escape_md(&truncate(&track.artists_joined(), 50)),
+            fmt_ms(track.duration_ms as u64),
+            escape_md(&truncate(&request.by, 32)),
+            request.asked_at
+        );
+        if party {
+            let votes = request.votes.len().to_string();
+            let vote = Btn::icon(&format!("req:vote:{}", request.nonce), Icon::MoveUp)
+                .with_label(&votes)
+                .build(icons);
+            parts.push(cards::section(text, vote));
+        } else {
+            parts.push(cards::text_with_cover(
+                text,
+                track.cover_thumb_url.as_deref(),
+            ));
+        }
     }
     if open.len() > SHOWN {
         parts.push(cards::text(format!(
@@ -301,10 +356,103 @@ pub fn requests_card(icons: &Icons, open: &[Request], picked: Option<u64>) -> Co
             .build(icons),
         ])),
     }
-    parts.push(cards::text(
-        "-# You and co-DJs can answer · requests expire after 30 minutes",
-    ));
+    parts.push(cards::text(if party {
+        "-# Join the call to vote · you and co-DJs can still answer by hand · requests expire after 30 minutes"
+    } else {
+        "-# You and co-DJs can answer · requests expire after 30 minutes"
+    }));
     cards::card(Some(color::BRAND), parts)
+}
+
+/// Party mode: while I'm in a call, the waiting request with the most votes
+/// goes up next, one at a time. Runs as each song starts, when the queue
+/// runs out, when a request comes in, and when party mode goes on.
+pub async fn party_turn(app: &Arc<App>) {
+    let prefs = app.prefs();
+    if !prefs.party || prefs.requests_off {
+        return;
+    }
+    let (Some(guild), Some(channel)) = (app.voice.guild(), app.voice.channel()) else {
+        return;
+    };
+    let Some(core) = app.core.get().cloned() else {
+        return;
+    };
+    // The Spotify app (or follow mode) is in charge: that's not ours to change.
+    let view = core.engine.queue_view();
+    if view.following || view.connect {
+        return;
+    }
+    // One request up next at a time; the votes pick the one after it.
+    let snap = core.engine.snapshot();
+    if snap
+        .up_next
+        .first()
+        .is_some_and(|t| t.requested_by.is_some())
+    {
+        return;
+    }
+    let request = {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        st.top().and_then(|nonce| st.take(nonce))
+    };
+    let Some(request) = request else {
+        return;
+    };
+    let votes = request.votes.len();
+    let source = format!("**{}**'s request", escape_md(&request.by));
+    let track = TrackInfo {
+        from: Some(source.clone().into()),
+        requested_by: Some(request.by_id),
+        ..request.track
+    };
+    let note = (votes > 1).then(|| format!("The top request, with {votes} votes."));
+    let queued = commands::enqueue(
+        app,
+        &core,
+        (guild, channel),
+        vec![track],
+        Placement::Next,
+        Some(source),
+        note,
+    )
+    .await;
+    match queued {
+        Ok(card) => {
+            if let Some(home) = app.ui.home() {
+                app.announce(home, card, SHORT_SECS).await;
+            }
+        }
+        Err(e) => tracing::warn!("party mode couldn't queue a request: {e:#}"),
+    }
+    redraw(app, None).await;
+}
+
+/// The requests card after a change of mode, and party mode's next pick.
+pub async fn refresh(app: &Arc<App>) {
+    redraw(app, None).await;
+    party_turn(app).await;
+}
+
+/// A vote in party mode; pressing again takes it back. Only people in the
+/// call vote.
+async fn vote(ix: &Ix, nonce: u64) -> Result<()> {
+    let app = &ix.app;
+    let voter = ix.user_id.map_or(0, |u| u.get());
+    if !friends::listeners(app).iter().any(|l| l.id == voter) {
+        return Err(oops("Join the call to vote on requests."));
+    }
+    {
+        let mut st = app.requests.state.lock();
+        st.tidy();
+        if let Some(request) = st.open.iter_mut().find(|r| r.nonce == nonce)
+            && !request.votes.remove(&voter)
+        {
+            request.votes.insert(voter);
+        }
+    }
+    redraw_here(ix).await
 }
 
 /// Puts the requests card up to date: edited where it is, posted if it
@@ -315,7 +463,8 @@ async fn redraw(app: &App, fallback: Option<Id<ChannelMarker>>) {
     let (card, existing) = {
         let mut st = app.requests.state.lock();
         st.tidy();
-        let card = (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked));
+        let card = (!st.open.is_empty())
+            .then(|| requests_card(&app.icons, &st.open, st.picked, app.prefs().party));
         (card, st.card)
     };
     let Some(card) = card else {
@@ -369,6 +518,9 @@ pub async fn answer(ix: &Ix, rest: &str, value: Option<&str>) -> Result<()> {
         (Some("back"), _, _) => {
             app.requests.state.lock().picked = None;
             return redraw_here(ix).await;
+        }
+        (Some("vote"), Some(nonce), _) => {
+            return vote(ix, nonce.parse().unwrap_or_default()).await;
         }
         (Some("one"), Some(nonce), Some(how)) => (nonce.parse::<u64>().ok(), how),
         (Some("all"), Some(how), _) => (None, how),
@@ -438,7 +590,8 @@ async fn redraw_here(ix: &Ix) -> Result<()> {
     let card = {
         let mut st = app.requests.state.lock();
         st.tidy();
-        (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked))
+        (!st.open.is_empty())
+            .then(|| requests_card(&app.icons, &st.open, st.picked, app.prefs().party))
     };
     match card {
         Some(card) => ix.update_message(vec![card]).await,
@@ -457,7 +610,8 @@ async fn redraw_after(ix: &Ix) {
     let card = {
         let mut st = app.requests.state.lock();
         st.tidy();
-        (!st.open.is_empty()).then(|| requests_card(&app.icons, &st.open, st.picked))
+        (!st.open.is_empty())
+            .then(|| requests_card(&app.icons, &st.open, st.picked, app.prefs().party))
     };
     match card {
         Some(card) => {

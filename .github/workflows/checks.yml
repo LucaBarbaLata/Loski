@@ -25,7 +25,7 @@ jobs:
       - name: Install the libraries Loski builds against
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake pkg-config libopus-dev
+          sudo apt-get install -y --no-install-recommends cmake pkg-config libopus-dev clang libclang-dev
 
       # The same Rust as the Dockerfile.
       - uses: dtolnay/rust-toolchain@master
