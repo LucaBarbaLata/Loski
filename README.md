@@ -27,7 +27,7 @@ A private Discord music bot that streams **real Spotify audio** (your Premium ac
 - Your library and stations: `/liked`, `/playlist` (your playlists suggested as you type), `/radio`
 - Search with tabs for songs, albums, playlists and artists; right-click any message with a Spotify link to play it
 - Follow mode: mirrors whatever you're playing on your own Spotify, in sync
-- A live now-playing panel: an artwork banner Loski draws for each song (frosted glass, a vinyl record sliding out of its sleeve, or minimal), a colour taken from the cover, where the song is playing from, an icon progress bar, the next two songs with their covers (from your Spotify app's queue when it's in charge), and controls
+- A live now-playing panel in the voice channel's chat: an artwork banner Loski draws for each song (frosted glass, a vinyl record sliding out of its sleeve, or minimal) with its genre, a colour taken from the cover, where the song is playing from, an icon progress bar, the next two songs with their covers (from your Spotify app's queue when it's in charge), and controls
 - Live lyrics that follow the song line by line, from the panel's Lyrics button, and `/lyrics` for any song
 - The song in the voice channel's status, so people see what's on before they join
 - When Loski leaves, the panel turns into a recap of the session, with a button to keep it as a mix
@@ -138,7 +138,8 @@ Each tag holds two builds, and Docker picks the right one by itself: `linux/amd6
 | `/skip [count]` | Skip one song, or several. |
 | `/previous` | Restart the song, or go back if it just started. |
 | `/seek position` | `1:23`, `95`, `+15` or `-10`. |
-| `/nowplaying` | Bring the panel back to the bottom of the chat. |
+| `/nowplaying` | What's playing: the song, where it's at and what's next, on a card only you see. |
+| `/panel` | Bring the panel to the channel you're in, until Loski leaves the call. It lives in the voice channel's chat otherwise. |
 | `/queue [page]` | See what's coming up. |
 | `/skipto position` | Jump ahead in the queue. |
 | `/remove position [to]` | Remove a song from the queue, or a run of them (`/remove 3 to:7`). |
@@ -185,7 +186,7 @@ The artwork banner is drawn with the bundled Bricolage Grotesque and Noto Sans f
 
 `/settings` opens a card only you can see. Every change is saved in `data/preferences.json` and used straight away, no restart:
 
-- **Panel channel.** Pick a channel and the panel always goes there, instead of wherever you last used `/play`. Clear it to go back.
+- **Panel channel.** The panel lives in the chat of the voice channel Loski is in, wherever `/play` was used. Pick a channel and it always goes there instead; clear it to go back. `/panel` brings it to another channel until Loski leaves the call.
 - **Panel look.** Full, with the artwork and up next, in one of three styles: **Glass** (the cover blurred behind a frosted panel), **Vinyl** (the cover as a sleeve with the record sliding out) or **Minimal** (the cover beside a flat colour from it). Or compact: no artwork, one row of buttons, and the rest (volume, lyrics, shuffle, repeat) in the More menu. Handy on a phone.
 - **24/7** (`/24-7`, or in `/settings`). Loski stays in its voice channel instead of leaving, and comes back to it after a restart or an update. The music keeps going whether or not anyone's in the channel: when the queue runs out, a Spotify radio picks up from the last song. Time it plays to an empty room doesn't count in your stats. `/stop` (or Leave on the panel) sends it away until the next `/play`.
 - **Leaving.** How long Loski waits after you leave the call, and after the music ends.
@@ -210,11 +211,15 @@ A new bot starts with Loski's own look. Whatever you change, here or in Discord'
 
 Talk to Loski in the call: its name first, then what you'd like.
 
-- **Turning them on.** `/voice` → **Turn on** downloads a 60 MB speech model once (whisper.cpp's small English model, from its page on Hugging Face, checked against its fingerprint) into `data/models`, and adds you as the first person Loski listens to. Friends press **Listen to me** in `/voice`; nobody else is listened to.
-- **What to say**, in English: "Loski, pause" (or stop), "resume" (or start), "skip", "go back", "volume 30", "louder", "quieter", "shuffle", "like this", "play Numb by Linkin Park", "leave". With a name of your own from `/customize`, say that name instead.
-- **Same rules as the buttons.** Anyone can say "like this", and "skip" from a listener is their vote to skip. "Play …" needs a co-DJ who may add songs; the rest needs full control. Loski answers in the chat, and when it hears its name but not a command, it says what it heard.
+- **Turning them on.** `/voice` → **Turn on** downloads a 60 MB speech model once (whisper.cpp's base English model, from its page on Hugging Face, checked against its fingerprint) into `data/models`, and adds you as the first person Loski listens to. Friends press **Listen to me** in `/voice`; nobody else is listened to, and a mic by someone's name on the panel shows who is.
+- **What to say**, in English, the name first: "Loski, pause" (or stop), "resume" (or start), "skip", "go back", "volume 30", "louder", "quieter", "shuffle", "like this", "what's playing?", "play Numb by Linkin Park", "play Numb next", "add Numb", "play my liked songs", "play my playlist Gym", "more like this", "repeat this song", "forward 30 seconds", "back 10 seconds", "sleep in 30 minutes", "stop after this song", "leave". If a song it picked isn't the one you meant, **Not this one?** under it opens the search. Loski learns how your artists are spelled from what you play, and answers to other names you give it in `/voice`. With a name of your own from `/customize`, say that name instead.
+- **Talking back.** Pick a voice under **Talking back** in `/voice` and Loski answers out loud: "Skipping!", "Playing Numb, by Linkin Park", "Yes?" when you say just its name. The music fades down before it talks and comes back gradually after. The most natural voice is [Chatterbox](https://github.com/resemble-ai/chatterbox), which runs on an NVIDIA graphics card in a container of its own (see [INSTALLATION.md](INSTALLATION.md#talking-back-with-your-graphics-card)). Without one there are simpler voices (Lessac, Ryan or Alan, about 60 MB each) through [Piper](https://github.com/rhasspy/piper), which comes with Loski's image. The usual replies are made ahead, so they come at once.
+- **Or in two goes.** Say just "Loski", wait for its "yes?", and say the command within a few seconds.
+- **What did it hear?** `/voice` shows the last few things said to Loski, what it made of them and what it did; your own other talk shows there too for two minutes, only to you. `/help` has a page with every command.
+- **Same rules as the buttons.** Anyone can say "like this" and "what's playing", "skip" from a listener is their vote to skip, and "play …" from a listener goes on the requests card. A co-DJ who may add songs adds them at the end; playing now or next, and the rest, needs full control; your liked songs and playlists are yours. Loski answers in the chat, and when it hears its name but not a command, it says what it heard.
 - **Private.** Loski stops deafening itself in calls while voice commands are on. Short bits of speech are turned into text on the computer Loski runs on and then forgotten; no audio is kept or sent anywhere. During the beta, what's said to Loski goes in its log, so the commands can be tuned; other talk is only counted.
-- **What it needs.** An Intel or AMD processor with AVX2 (most from the last ten years) or a 64-bit ARM one; `/voice` says so if it can't run. Headphones help: music from your speakers into your microphone makes commands harder to pick out.
+- **What it needs.** An Intel or AMD processor with AVX2 (most from the last ten years) or a 64-bit ARM one; `/voice` says so if it can't run. It picks commands out over music from your speakers and other people talking, though headphones still help.
+- **On a slower computer.** `/voice` says how long a command takes to understand on yours. A Raspberry Pi or an old laptop can pick the **Quick** speech model there (31 MB, whisper.cpp's tiny English model): about 2× faster, though a little less sure of what it hears.
 
 ## Friends
 
@@ -234,8 +239,9 @@ Loski leaves a minute after the last person who runs it (you or a co-DJ) leaves 
 - **When something breaks.** If voice drops, Loski rejoins on its own (and tells you if it can't). If the Spotify connection stays down, or Spotify signs it out of search, you get a DM with what to do, and another when it's fixed.
 - **Logs.** Besides `docker logs`, Loski writes a log file per day to `data/logs` and keeps the last 14 days, so you can see what happened even after a restart.
 
+- **Loski played.** `/stats` and Wrapped also say how long Loski played in all: every minute, with nobody in the call too, and songs skipped early. It's kept hour by hour in `data/played.json`, apart from your listening.
 - **Stats and history.** A song counts once it has played for 30 seconds (half of it for very short songs), the same rule Spotify uses, and only the time it actually played is added up. Days and months start at midnight in your timezone, which is UTC until you set it in `/settings` (or `TIMEZONE=Europe/Bucharest` in `.env`). On the 1st of each month Loski DMs you a recap of the month before, and on January 1st Loski Wrapped for the year; if it was off that day, they come the next time it starts. History lives in `data/history.jsonl`, mixes in `data/mixes.json` and likes in `data/likes.jsonl`.
-- **Genres** come from [MusicBrainz](https://musicbrainz.org), the open music encyclopedia, because Spotify no longer shares artist genres with apps like Loski. Loski looks up the artists you play most, about one a second in the background, and keeps the answers in `data/genres.json`; artists MusicBrainz doesn't know are left out. Only artist names are sent.
+- **Genres** come from [MusicBrainz](https://musicbrainz.org), the open music encyclopedia, because Spotify no longer shares artist genres with apps like Loski. Loski looks up the artists you play, about one a second in the background, and keeps the answers in `data/genres.json`; artists MusicBrainz doesn't know are left out. Only artist names are sent. The banner shows the genre once the artist has been looked up, so a new artist's first song may go without.
 - **Blend** is rebuilt every Monday (or the first time Loski runs after one) from your 30 most played songs of the last four weeks and up to 30 that friends liked or asked for, taking turns. It's saved as the mix **Blend**, so `/mix load name:Blend` plays it.
 - **Milestones** (10, 25, 50, 100… hours; 100, 500, 1,000… songs; 7, 14, 30… days in a row) arrive as DMs. The ones you'd already passed when you updated aren't sent.
 
@@ -267,6 +273,12 @@ docker run --rm -v "$PWD:/src" -v loski-cargo:/usr/local/cargo/registry -v loski
 
 The tests need no Spotify or Discord connection. They cover the queue, the sound filters, stats, every card against Discord's limits, and the playback engine, which runs whole sessions (gapless, crossfade, repeat, sleep timer, unplayable songs, history) against fake players that record what they're told.
 
+Voice commands have a bench of their own: spoken commands and everyday talk, played clean, over music and over someone else talking, through the same speech cutting and model Loski uses. It reports how many commands work, how often talk sets something off, and how long answers take. Make the clips on Windows with `scripts/voice-bench.ps1` (into `data/voice-bench`), then run it with the speech model from `data/models`:
+
+```bash
+docker run --rm -v "$PWD:/src" -v loski-cargo:/usr/local/cargo/registry -v loski-target:/target -e CARGO_TARGET_DIR=/target -e LOSKI_SPEECH_MODEL=data/models/ggml-base.en-q5_1.bin -e LOSKI_BENCH=data/voice-bench -w /src loski-dev cargo test voice_bench -- --ignored --nocapture
+```
+
 On GitHub, `.github/workflows/checks.yml` runs formatting, clippy and the tests on every push, then builds the Docker image. For `main` and version tags it also publishes the image (see [Prebuilt image](#prebuilt-image)); pull requests only build it.
 
 How the code is laid out:
@@ -283,6 +295,8 @@ src/
   stats.rs          listening stats and the monthly recap, in your timezone
   store.rs          settings, history and mixes in ./data
   banner.rs         the artwork banner drawn for each song
+  speech.rs         voice commands: the speech model, cutting speech up, what it asks for
+  genres.rs         artist genres from MusicBrainz
   color.rs          card colour from album art
   logging.rs        console and daily log files
   personality.rs    Loski's lines

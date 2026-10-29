@@ -97,9 +97,16 @@ pub struct SeekCmd {
 #[derive(CommandModel, CreateCommand)]
 #[command(
     name = "nowplaying",
-    desc = "Bring the now playing panel back to the bottom of the chat"
+    desc = "What's playing: the song, where it's at and what's next"
 )]
 pub struct NowPlayingCmd;
+
+#[derive(CommandModel, CreateCommand)]
+#[command(
+    name = "panel",
+    desc = "Bring the now playing panel to this channel, until Loski leaves the call"
+)]
+pub struct PanelCmd;
 
 #[derive(CommandModel, CreateCommand)]
 #[command(name = "queue", desc = "See what's coming up")]
@@ -279,6 +286,7 @@ pub(super) fn definitions(bot: &str) -> Vec<Command> {
         PreviousCmd::create_command().into(),
         SeekCmd::create_command().into(),
         NowPlayingCmd::create_command().into(),
+        PanelCmd::create_command().into(),
         QueueCmd::create_command().into(),
         SkipToCmd::create_command().into(),
         RemoveCmd::create_command().into(),
@@ -377,6 +385,7 @@ pub async fn run(app: Arc<App>, interaction: Interaction) {
         "previous" => PreviousCmd => previous,
         "seek" => SeekCmd => seek,
         "nowplaying" => NowPlayingCmd => now_playing,
+        "panel" => PanelCmd => panel_here,
         "queue" => QueueCmd => queue,
         "skipto" => SkipToCmd => skip_to,
         "remove" => RemoveCmd => remove,
@@ -566,7 +575,7 @@ async fn play(ix: &Ix, cmd: PlayCmd) -> Result<()> {
     let target = require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+        app.ui.asked_from(channel);
     }
     let placement = if cmd.next.unwrap_or(false) {
         Placement::Next
@@ -605,7 +614,7 @@ async fn play(ix: &Ix, cmd: PlayCmd) -> Result<()> {
 /// How many results the search card shows (with covers).
 pub(super) const PICKER_RESULTS: usize = 5;
 
-async fn show_picker(ix: &Ix, query: &str, results: Vec<TrackInfo>) -> Result<()> {
+pub(super) async fn show_picker(ix: &Ix, query: &str, results: Vec<TrackInfo>) -> Result<()> {
     let nonce = ix.id.get();
     let pick = Pick {
         query: query.to_string(),
@@ -702,7 +711,7 @@ pub(super) fn picker_card(icons: &Icons, pick: &Pick, nonce: u64) -> Component {
     }
     for (i, item) in pick.items.iter().enumerate() {
         let marker = if i == pick.selected { "▸ " } else { "" };
-        let explicit = if item.explicit { "  `E`" } else { "" };
+        let explicit = if item.explicit { "  `Explicit`" } else { "" };
         let line = format!(
             "{marker}`{}` **{}**{explicit}\n{}",
             i + 1,
@@ -929,16 +938,41 @@ async fn seek(ix: &Ix, cmd: SeekCmd) -> Result<()> {
         .await
 }
 
+/// What's playing, only for whoever asked.
 async fn now_playing(ix: &Ix, _: NowPlayingCmd) -> Result<()> {
-    let core = ix.app.core()?;
-    ix.defer_ephemeral().await?;
-    if let Some(channel) = ix.channel_id {
-        ix.app.ui.set_home(channel);
+    let app = &ix.app;
+    let core = app.core()?;
+    let card = panel::now_card(app, &core.engine.snapshot());
+    ix.reply_private(vec![card]).await
+}
+
+/// The panel here, until Loski leaves the call.
+async fn panel_here(ix: &Ix, _: PanelCmd) -> Result<()> {
+    let app = &ix.app;
+    let core = app.core()?;
+    let channel = ix
+        .channel_id
+        .ok_or_else(|| oops("This only works in a server."))?;
+    match app.voice.guild() {
+        None => {
+            return Err(oops(
+                "I'm not in a call. `/play` something, then `/panel` brings the panel here.",
+            ));
+        }
+        Some(guild) if ix.guild_id != Some(guild) => {
+            return Err(oops("I'm playing in another server right now."));
+        }
+        Some(_) => {}
     }
-    panel::repost(&ix.app, &core).await;
-    ix.reply(vec![cards::info(&ix.app.icons, "Here's the panel 👇")])
-        .await?;
-    ix.delete_later(5);
+    ix.defer_ephemeral().await?;
+    app.ui.put_here(channel);
+    panel::repost(app, &core).await;
+    let card = cards::info(
+        &app.icons,
+        "Here's the panel 👇 It stays in this channel until I leave the call.",
+    );
+    ix.reply(vec![card]).await?;
+    ix.delete_later(8);
     Ok(())
 }
 
@@ -1110,7 +1144,7 @@ async fn follow(ix: &Ix, _: FollowCmd) -> Result<()> {
     let (guild, channel) = require_voice(ix)?;
     ix.defer().await?;
     if let Some(home) = ix.channel_id {
-        app.ui.set_home(home);
+        app.ui.asked_from(home);
     }
     voice::join(app, &core, guild, channel).await?;
     core.engine.set_following(true);
@@ -1195,7 +1229,7 @@ async fn join(ix: &Ix, _: JoinCmd) -> Result<()> {
     }
     ix.defer().await?;
     if let Some(home) = ix.channel_id {
-        app.ui.set_home(home);
+        app.ui.asked_from(home);
     }
     voice::join(app, &core, guild, channel).await?;
     let snap = core.engine.snapshot();
@@ -1227,7 +1261,7 @@ async fn always_on(ix: &Ix, cmd: AlwaysOnCmd) -> Result<()> {
     {
         let core = app.core()?;
         if let Some(home) = ix.channel_id {
-            app.ui.set_home(home);
+            app.ui.asked_from(home);
         }
         voice::join(app, &core, guild, channel).await?;
     }
@@ -1280,6 +1314,7 @@ pub(super) async fn shortcut(ix: &Ix, command: &str) -> Result<()> {
         "stats" => stats::show(ix, crate::stats::Range::Month, LONG_SECS * 2).await,
         "settings" => settings::settings(ix, settings::SettingsCmd).await,
         "customize" => super::customize::customize(ix, super::customize::CustomizeCmd).await,
+        "voice" => super::hearing::voice_cmd(ix, super::hearing::VoiceCmd).await,
         "status" => status::status(ix, status::StatusCmd).await,
         "mysound" => {
             let card = sound::eq_card(&app.icons, &sound::EqView::read(app), false);

@@ -164,7 +164,8 @@ have_image() { docker image inspect "$(image)" >/dev/null 2>&1; }
 # the image isn't public yet), so the caller can build instead.
 update_image() {
     step 'Downloading the latest Loski image'
-    compose pull && return 0
+    # Loski's own image only: the graphics-card voice is built on this computer.
+    compose pull loski && return 0
     problem "Couldn't download it (see above), so building it from this folder instead."
     return 1
 }

@@ -29,6 +29,7 @@ use crate::util::{escape_md, truncate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topic {
     Playing,
+    Voice,
     Queue,
     Sound,
     Phone,
@@ -39,8 +40,9 @@ pub enum Topic {
 }
 
 impl Topic {
-    pub const ALL: [Topic; 8] = [
+    pub const ALL: [Topic; 9] = [
         Topic::Playing,
+        Topic::Voice,
         Topic::Queue,
         Topic::Sound,
         Topic::Phone,
@@ -53,6 +55,7 @@ impl Topic {
     fn key(self) -> &'static str {
         match self {
             Topic::Playing => "playing",
+            Topic::Voice => "voice",
             Topic::Queue => "queue",
             Topic::Sound => "sound",
             Topic::Phone => "phone",
@@ -70,6 +73,7 @@ impl Topic {
     fn title(self) -> &'static str {
         match self {
             Topic::Playing => "Playing",
+            Topic::Voice => "Voice commands (beta)",
             Topic::Queue => "The queue",
             Topic::Sound => "Sound",
             Topic::Phone => "From your phone",
@@ -83,6 +87,7 @@ impl Topic {
     fn icon(self) -> Icon {
         match self {
             Topic::Playing => Icon::Play,
+            Topic::Voice => Icon::Lyrics,
             Topic::Queue => Icon::Queue,
             Topic::Sound => Icon::Filters,
             Topic::Phone => Icon::Connect,
@@ -96,6 +101,9 @@ impl Topic {
     fn intro(self) -> &'static str {
         match self {
             Topic::Playing => "Join a voice channel first; I come to you.",
+            Topic::Voice => {
+                "Talk to me in the call. Only people who said yes in /voice are listened to."
+            }
             Topic::Queue => "Songs line up behind the one playing.",
             Topic::Sound => "Changes are heard straight away, by everyone in the call.",
             Topic::Phone => "Control me from the Spotify app.",
@@ -110,6 +118,7 @@ impl Topic {
     fn summary(self) -> &'static str {
         match self {
             Topic::Playing => "Play, pause, skip, volume, lyrics",
+            Topic::Voice => "Skip, pause or play a song by saying so",
             Topic::Queue => "What's next, and changing it",
             Topic::Sound => "Filters, crossfade, sleep timer",
             Topic::Phone => "Spotify Connect and follow mode",
@@ -125,9 +134,10 @@ impl Topic {
     fn actions(self) -> &'static [(&'static str, &'static str, Icon)] {
         match self {
             Topic::Playing => &[
-                ("nowplaying", "Bring the panel down", Icon::Music),
+                ("nowplaying", "What's playing", Icon::Music),
                 ("lyrics", "Lyrics", Icon::Lyrics),
             ],
+            Topic::Voice => &[("voice", "Voice commands", Icon::Lyrics)],
             Topic::Queue => &[("queue", "Show the queue", Icon::Queue)],
             Topic::Sound => &[("mysound", "My sound", Icon::Filters)],
             Topic::Phone => &[],
@@ -215,8 +225,15 @@ pub const ENTRIES: &[Entry] = &[
     entry(
         Topic::Playing,
         &["nowplaying"],
-        "bring the panel, with all the buttons, back to the bottom of the chat.",
-        "panel controls player buttons",
+        "what's playing: the song, where it's at and what's next. Only you see it.",
+        "song current playing now what which title name",
+        Listener,
+    ),
+    entry(
+        Topic::Playing,
+        &["panel"],
+        "bring the panel, with all the buttons, to the channel you're in. It lives in the voice channel's chat otherwise.",
+        "panel move here channel controls player buttons",
         Queue,
     ),
     entry(
@@ -224,13 +241,6 @@ pub const ENTRIES: &[Entry] = &[
         &["lyrics"],
         "the words, line by line as the song plays, or for any song you name.",
         "words sing karaoke text",
-        Listener,
-    ),
-    entry(
-        Topic::Playing,
-        &["voice"],
-        "voice commands (beta): say \"{bot}, skip\" or \"{bot}, play …\" in the call.",
-        "voice speak say talk microphone mic hands",
         Listener,
     ),
     entry(
@@ -259,6 +269,104 @@ pub const ENTRIES: &[Entry] = &[
         &["24-7"],
         "I stay in the call and keep the music going, even with nobody there. A radio picks up when the queue runs out.",
         "24/7 247 always stay forever nonstop alone radio keep",
+        Owner,
+    ),
+    entry(
+        Topic::Voice,
+        &["voice"],
+        "turn voice commands on (whoever runs me does), say yes to being listened to, and see what I heard lately.",
+        "voice speak say talk microphone mic hands listen hear",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "Say my name first, then what you'd like, in English: **{bot}, skip**. I answer in about a second. Or say just **{bot}**, and the command after my \"yes?\".",
+        "voice how name say english",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, pause** (or stop) · **resume** (or start) · **skip** (or next) · **go back**",
+        "voice say pause stop resume start skip next back previous",
+        Full,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, volume 30** · **louder** · **quieter** · **shuffle**",
+        "voice say volume loud quiet up down shuffle",
+        Full,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, play** and a song, like **{bot}, play Numb by Linkin Park**. **Add** *a song* puts it at the end of the queue; if I picked the wrong one, **Not this one?** in the chat opens the search.",
+        "voice say play song add queue search",
+        Queue,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, like this** puts your ♥ on the song, and **{bot}, skip** counts as your vote to skip unless you run me.",
+        "voice say like heart love vote skip",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, leave**: I go, until the next `/play` or `/join`.",
+        "voice say leave bye go away disconnect",
+        Full,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, what's playing?** I tell you, out loud with talking back on. Asking for a song (**{bot}, play** *a song*) when you can't add songs puts it on the requests card.",
+        "voice say what playing song name title request ask",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, play** *a song* **next** · **more like this** (a radio) · **repeat this song** · **repeat the queue** · **repeat off** · **forward 30 seconds** · **back 10 seconds**",
+        "voice say next radio repeat loop forward rewind seconds",
+        Full,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, sleep in 30 minutes** · **stop after this song** · **cancel the sleep timer**",
+        "voice say sleep timer minutes stop after",
+        Full,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "**{bot}, play my liked songs** · **play my playlist** *name*. In /voice you can give me other names to answer to.",
+        "voice say liked playlist favorites names alias",
+        Owner,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "I can pick you out over music and other people talking, but headphones still help. With talking back on (picked in /voice), I answer out loud, and the music fades down while I do. It's a beta, so I won't catch everything yet.",
+        "voice headphones speakers music beta problems not working hear",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "A mic by someone's name on the panel means I'm listening to them for voice commands.",
+        "voice mic microphone panel who listening",
+        Listener,
+    ),
+    entry(
+        Topic::Voice,
+        &[],
+        "On a slower computer (a Raspberry Pi, an old laptop), pick the **Quick** speech model in /voice: /voice says how long a command takes to understand here.",
+        "voice slow lag wait raspberry pi model quick accurate speed",
         Owner,
     ),
     entry(
@@ -605,17 +713,15 @@ pub fn home_card(icons: &Icons, view: &HelpView) -> Component {
 /// One topic's page: its commands, and buttons that do the main things.
 pub fn topic_card(icons: &Icons, view: &HelpView, topic: Topic) -> Component {
     let lines: Vec<String> = view.visible(topic).map(|e| view.line(e)).collect();
-    let mut parts = vec![
-        cards::text(format!(
-            "{} **{}**\n-# {}",
-            icons.md(topic.icon()),
-            topic.title(),
-            topic.intro()
-        )),
-        cards::text(lines.join("\n")),
-        cards::divider(),
-        topic_menu(icons, view, Some(topic)),
-    ];
+    let mut parts = vec![cards::text(format!(
+        "{} **{}**\n-# {}",
+        icons.md(topic.icon()),
+        topic.title(),
+        topic.intro()
+    ))];
+    // A long page (the voice commands) takes more than one block of text.
+    parts.extend(cards::text_blocks(lines));
+    parts.extend([cards::divider(), topic_menu(icons, view, Some(topic))]);
     let mut buttons: Vec<Component> = if view.in_server {
         topic
             .actions()
@@ -823,7 +929,10 @@ mod tests {
     #[test]
     fn everyone_sees_only_what_they_may_use() {
         let listener = view(Access::Listener);
-        assert_eq!(listener.topics(), [Topic::Playing, Topic::Friends]);
+        assert_eq!(
+            listener.topics(),
+            [Topic::Playing, Topic::Voice, Topic::Friends]
+        );
         assert!(
             listener
                 .visible(Topic::Playing)

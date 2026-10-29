@@ -28,7 +28,7 @@ use super::{
     oops,
 };
 use crate::{
-    spotify::{Lookup, MAX_TRACKS_PER_REQUEST, library::PlaylistRef, parse_lookup},
+    spotify::{Lookup, MAX_TRACKS_PER_REQUEST, Resolved, library::PlaylistRef, parse_lookup},
     store::Store,
     track::TrackInfo,
     util::escape_md,
@@ -220,7 +220,7 @@ pub async fn radio(ix: &Ix, cmd: RadioCmd) -> Result<()> {
     let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+        app.ui.asked_from(channel);
     }
     let (seed, play_seed) = radio_seed(&core, cmd.song.as_deref()).await?;
     let station = core
@@ -297,7 +297,7 @@ pub async fn liked(ix: &Ix, cmd: LikedCmd) -> Result<()> {
     let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+        app.ui.asked_from(channel);
     }
     let shuffle = cmd.shuffle.unwrap_or(true);
     if matches!(cmd.from, Some(LikedFrom::Friends)) {
@@ -373,7 +373,7 @@ pub async fn playlist(ix: &Ix, cmd: PlaylistCmd) -> Result<()> {
     let target = commands::require_voice(ix)?;
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+        app.ui.asked_from(channel);
     }
     let lookup = match parse_lookup(&cmd.name) {
         Lookup::Text(name) => {
@@ -413,6 +413,25 @@ pub async fn playlist(ix: &Ix, cmd: PlaylistCmd) -> Result<()> {
     ix.reply_temp(vec![card], SHORT_SECS).await
 }
 
+/// One of your playlists by its name, and its songs: for "play my
+/// playlist …".
+pub(super) async fn my_playlist(core: &Core, name: &str) -> Result<(String, Resolved)> {
+    let list = my_playlists(core).await?;
+    let found = find_playlist(&list, name).ok_or_else(|| {
+        oops(format!(
+            "I couldn't find your playlist “{}”.",
+            escape_md(name)
+        ))
+    })?;
+    let resolved = core
+        .spotify
+        .resolve(Lookup::Playlist(found.id))
+        .await
+        .map_err(|e| oops(format!("Hmm, {e}")))?
+        .ok_or_else(|| oops("I couldn't open that playlist."))?;
+    Ok((found.name.clone(), resolved))
+}
+
 /// The first Spotify link or URI in some text.
 pub fn find_spotify_link(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || "<>()[]\"'".contains(c))
@@ -449,7 +468,7 @@ pub async fn message_command(ix: &Ix, data: CommandData) -> Result<()> {
 
     ix.defer().await?;
     if let Some(channel) = ix.channel_id {
-        app.ui.set_home(channel);
+        app.ui.asked_from(channel);
     }
     let resolved = core
         .spotify

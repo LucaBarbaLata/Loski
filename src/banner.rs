@@ -395,6 +395,8 @@ pub struct BannerText {
     pub year: Option<i32>,
     pub duration_ms: u32,
     pub explicit: bool,
+    /// The artist's genre, once it's been looked up.
+    pub genre: Option<String>,
 }
 
 impl From<&TrackInfo> for BannerText {
@@ -406,6 +408,7 @@ impl From<&TrackInfo> for BannerText {
             year: t.year,
             duration_ms: t.duration_ms,
             explicit: t.explicit,
+            genre: None,
         }
     }
 }
@@ -728,16 +731,25 @@ fn details(
     let artist_pen = Pen::white(&artist_face.medium, artist_size, 0.93);
     canvas.text(&artist_pen, &artist, at.x, y - artist_size * 0.18);
 
-    // Chips: quality, length, explicit.
+    // Chips: the genre, length, explicit.
     y += 28.0;
-    let mut chips = vec!["320 kbps".to_string(), fmt_ms(info.duration_ms as u64)];
-    if info.explicit {
-        chips.push("E".to_string());
-    }
     let chip_pen = Pen {
         tracking: 0.4,
         ..Pen::white(&FONTS.bricolage.medium, chip_size, 0.96)
     };
+    let mut chips = Vec::new();
+    if let Some(genre) = &info.genre {
+        chips.push(ellipsize(
+            chip_pen.font,
+            chip_size,
+            genre,
+            at.max_width * 0.55,
+        ));
+    }
+    chips.push(fmt_ms(info.duration_ms as u64));
+    if info.explicit {
+        chips.push("Explicit".to_string());
+    }
     let mut x = at.x;
     for chip in chips {
         let w = text_width(chip_pen.font, chip_size, &chip, chip_pen.tracking) + 32.0;
@@ -755,17 +767,19 @@ fn details(
 }
 
 /// Recently rendered banners, so reposting the panel doesn't redraw.
-type Rendered = ((SpotifyId, Style), Arc<Vec<u8>>);
+type Rendered = ((SpotifyId, Style, Option<String>), Arc<Vec<u8>>);
 static CACHE: LazyLock<Mutex<VecDeque<Rendered>>> = LazyLock::new(Default::default);
 const CACHE_SIZE: usize = 6;
 
-/// Downloads the cover and renders the banner for a song.
+/// Downloads the cover and renders the banner for a song, with its
+/// artist's genre when that's known.
 pub async fn for_track(
     http: &reqwest::Client,
     track: &TrackInfo,
     style: Style,
+    genre: Option<String>,
 ) -> Option<Arc<Vec<u8>>> {
-    let key = (track.id, style);
+    let key = (track.id, style, genre.clone());
     if let Some((_, bytes)) = CACHE.lock().iter().find(|(k, _)| *k == key) {
         return Some(bytes.clone());
     }
@@ -779,7 +793,10 @@ pub async fn for_track(
         .bytes()
         .await
         .ok()?;
-    let info = BannerText::from(track);
+    let info = BannerText {
+        genre,
+        ..BannerText::from(track)
+    };
     let rendered = tokio::task::spawn_blocking(move || {
         let cover = image::load_from_memory(&bytes).ok()?.to_rgb8();
         render(&cover, &info, style)
@@ -816,6 +833,7 @@ mod tests {
             year: Some(2011),
             duration_ms: 243_000,
             explicit: true,
+            genre: Some("Synth-pop".into()),
         }
     }
 

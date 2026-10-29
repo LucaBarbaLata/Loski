@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Datelike, Days, Months, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 
-use crate::{genres::GenreMap, store::HistoryEntry};
+use crate::{
+    genres::GenreMap,
+    store::{HistoryEntry, PlayedHours},
+};
 
 /// Songs played before listening time was tracked count as an average song.
 const LEGACY_LISTEN_MS: u64 = 210_000;
@@ -130,6 +133,24 @@ pub struct Stats {
     pub top_genres: Vec<(String, u64)>,
     /// Friends you listened with, most time together first.
     pub together: Vec<Together>,
+    /// How long Loski played music in these days, anyone listening or not
+    /// (see `played_in`).
+    pub loski_ms: u64,
+}
+
+/// How long Loski played from `first` to `last` (both included) in `tz`:
+/// every minute it played, with nobody in the call too, and songs skipped
+/// before they counted.
+pub fn played_in(played: &PlayedHours, first: NaiveDate, last: NaiveDate, tz: Tz) -> u64 {
+    played
+        .iter()
+        .filter(|(hour, _)| {
+            tz.timestamp_opt(**hour * 3600, 0)
+                .single()
+                .is_some_and(|at| (first..=last).contains(&at.date_naive()))
+        })
+        .map(|(_, ms)| ms)
+        .sum()
 }
 
 struct Play<'a> {
@@ -418,6 +439,7 @@ pub fn compute(
         best_day,
         top_genres,
         together,
+        loski_ms: 0,
     }
 }
 
@@ -732,5 +754,30 @@ mod tests {
         assert_eq!(stats.bars.len(), 1);
         assert!(stats.peak_hour.is_none());
         assert_eq!(stats.streak, 0);
+    }
+
+    #[test]
+    fn counts_the_hours_loski_played_in_your_days() {
+        let tz: Tz = "Europe/Bucharest".parse().unwrap();
+        let hour = |y, m, d, h| {
+            tz.with_ymd_and_hms(y, m, d, h, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp()
+                / 3600
+        };
+        let played: PlayedHours = [
+            // Late on the 27th in Bucharest (still the 27th there).
+            (hour(2026, 10, 27, 23), 30 * 60_000),
+            (hour(2026, 10, 28, 0), 60 * 60_000),
+            (hour(2026, 10, 28, 22), 15 * 60_000),
+            (hour(2026, 10, 30, 12), 5 * 60_000),
+        ]
+        .into_iter()
+        .collect();
+        let day = |d| NaiveDate::from_ymd_opt(2026, 10, d).unwrap();
+        assert_eq!(played_in(&played, day(28), day(28), tz), 75 * 60_000);
+        assert_eq!(played_in(&played, day(27), day(30), tz), 110 * 60_000);
+        assert_eq!(played_in(&played, day(29), day(29), tz), 0);
     }
 }

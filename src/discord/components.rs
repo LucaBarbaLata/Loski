@@ -63,7 +63,9 @@ pub async fn handle(app: Arc<App>, interaction: Interaction) {
     } else if let Some(key) = id.strip_prefix("loski:help:") {
         help::change(&ix, key, value).await
     } else if let Some(key) = id.strip_prefix("loski:voice:") {
-        hearing::change(&ix, key).await
+        hearing::change(&ix, key, value).await
+    } else if let Some(query) = id.strip_prefix("loski:vpick:") {
+        hearing::pick_again(&ix, query).await
     } else if id.starts_with("loski:") {
         match ix.app.core.get().cloned() {
             Some(core) => loski(&ix, &core, id, value, message_id).await,
@@ -444,8 +446,9 @@ async fn loski(
         "loski:mixback" => return mixes::select(ix, None).await,
         other => {
             if let Some(page) = other.strip_prefix("loski:qpage:") {
+                let page = page.split(':').next().and_then(|p| p.parse().ok());
                 return ix
-                    .update_message(vec![queue_card(page.parse().unwrap_or(0), None)])
+                    .update_message(vec![queue_card(page.unwrap_or(0), None)])
                     .await;
             }
             if let Some(page) = other.strip_prefix("loski:qshuffle:") {
@@ -537,6 +540,7 @@ pub async fn modal(app: Arc<App>, interaction: Interaction) {
         "loski:m:me" => customize::edited(&ix, &data).await,
         "loski:m:here" => customize::edited_here(&ix, &data).await,
         "loski:m:helpfind" => help::found(&ix, &text("what")).await,
+        "loski:m:voicenames" => hearing::set_names(&ix, &text("names")).await,
         id => {
             if let Some(old) = id.strip_prefix("loski:m:mixren:") {
                 mixes::rename(&ix, old, &text("name")).await

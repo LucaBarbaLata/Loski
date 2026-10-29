@@ -79,7 +79,14 @@ pub(super) async fn compute(app: &App, range: Range) -> Stats {
     let now = now(app);
     let known = app.genres.known();
     let stats = tokio::task::spawn_blocking(move || {
-        stats::compute(&store.all_history(), range, now, &known)
+        let mut stats = stats::compute(&store.all_history(), range, now, &known);
+        stats.loski_ms = stats::played_in(
+            &store.played_hours(),
+            stats.first_day,
+            stats.last_day,
+            now.timezone(),
+        );
+        stats
     })
     .await
     .expect("stats task");
@@ -240,6 +247,18 @@ async fn picture(app: &App, stats: &Stats) -> Option<Vec<u8>> {
     if let Some(hour) = stats.peak_hour {
         chips.push(listener(hour).to_string());
     }
+    // How long Loski played, whoever was there, first: it's the one number
+    // that isn't about you.
+    if stats.loski_ms >= 60_000 {
+        chips.insert(
+            0,
+            format!(
+                "{} played {}",
+                truncate(&app.name(), 16),
+                short_duration(stats.loski_ms)
+            ),
+        );
+    }
 
     let count = stats.bars.len();
     let bars = stats
@@ -307,6 +326,12 @@ fn alt_text(stats: &Stats) -> String {
         fmt_duration_words(stats.listened_ms),
         plural(stats.plays, "play", "plays")
     );
+    if stats.loski_ms >= 60_000 {
+        text.push_str(&format!(
+            " Played {} in all.",
+            fmt_duration_words(stats.loski_ms)
+        ));
+    }
     if let Some(song) = stats.top_songs.first() {
         text.push_str(&format!(" Top song: {} by {}.", song.title, song.artists));
     }
@@ -708,6 +733,16 @@ fn wrapped_tiles(stats: &Stats, name: impl Fn(u64) -> String) -> Vec<Tile> {
     tiles
 }
 
+/// "1,240 hours", or "45 minutes" for less than an hour.
+fn played_words(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    if minutes < 60 {
+        plural(minutes, "minute", "minutes")
+    } else {
+        format!("{} hours", thousands(minutes / 60))
+    }
+}
+
 /// Draws Wrapped's highlights picture.
 async fn wrapped_picture(app: &App, stats: &Stats, year: i32) -> Option<Vec<u8>> {
     let cover = fetch_cover(
@@ -726,6 +761,19 @@ async fn wrapped_picture(app: &App, stats: &Stats, year: i32) -> Option<Vec<u8>>
             plural(stats.artists as u64, "artist", "artists"),
         ),
         tiles: wrapped_tiles(stats, |id| friend_name(app, id)),
+        aside: (stats.loski_ms >= 60_000).then(|| {
+            let played = format!(
+                "PLAYED {} IN ALL",
+                played_words(stats.loski_ms).to_uppercase()
+            );
+            // A long name is already in the kicker, and would run into it.
+            let name = picture::signature(&app.name());
+            if name.chars().count() <= 14 {
+                format!("{name} {played}")
+            } else {
+                played
+            }
+        }),
         cover,
     };
     tokio::task::spawn_blocking(move || picture::render_wrapped(&picture))
@@ -763,6 +811,13 @@ pub fn wrapped_card(
             plural(stats.songs as u64, "song", "songs"),
             plural(stats.artists as u64, "artist", "artists"),
         )];
+        if stats.loski_ms >= 60_000 {
+            lines.push(format!(
+                "-# {} played {} in all, with or without anyone there.",
+                escape_md(bot),
+                played_words(stats.loski_ms)
+            ));
+        }
         for tile in wrapped_tiles(stats, name) {
             lines.push(format!(
                 "-# {}\n**{}** · {}",
@@ -915,6 +970,12 @@ fn summary(icons: &Icons, stats: &Stats) -> Component {
         plural(stats.songs as u64, "song", "songs"),
         plural(stats.artists as u64, "artist", "artists"),
     );
+    if stats.loski_ms >= 60_000 {
+        facts.push(format!(
+            "▶️ I played {} in all",
+            fmt_duration_words(stats.loski_ms)
+        ));
+    }
     if !facts.is_empty() {
         text.push('\n');
         text.push_str(&facts.join(" · "));

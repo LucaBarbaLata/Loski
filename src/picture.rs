@@ -62,6 +62,8 @@ pub struct WrappedPicture {
     pub headline: String,
     pub subline: String,
     pub tiles: Vec<Tile>,
+    /// "LOSKI PLAYED 1,240 HOURS IN ALL", across from the kicker.
+    pub aside: Option<String>,
     /// The top song's cover, for the backdrop.
     pub cover: Option<RgbImage>,
 }
@@ -241,6 +243,11 @@ pub fn render_wrapped(picture: &WrappedPicture) -> Vec<u8> {
         }],
     );
     canvas.text(&kicker_pen(0.72), &picture.kicker, X, 100.0);
+    if let Some(aside) = &picture.aside {
+        let pen = kicker_pen(0.62);
+        let width = banner::text_width(pen.font, pen.size, aside, pen.tracking);
+        canvas.text(&pen, aside, X + INNER - width, 100.0);
+    }
     let (size, headline) = fitting(
         &FONTS.bricolage,
         &picture.headline,
@@ -604,6 +611,7 @@ mod tests {
                 headline: "41,230 minutes".into(),
                 subline: "of music · 9,812 plays · 1,204 songs · 380 artists".into(),
                 tiles,
+                aside: Some("LOSKI PLAYED 1,240 HOURS IN ALL".into()),
                 cover,
             });
             let img = image::load_from_memory(&jpeg).unwrap();
@@ -667,9 +675,11 @@ mod tests {
     }
 
     /// The pictures in the README. The artwork shows The Diary of Jane, with
-    /// its real cover when LOSKI_README_COVER points at it (a drawn one
-    /// otherwise); the stats and Wrapped songs are made up. Run with
-    /// LOSKI_README_OUT set to a folder: `cargo test readme_pictures -- --ignored`.
+    /// its real cover when LOSKI_README_COVER points at it, and the stats'
+    /// top songs (and Wrapped's top song) have theirs when LOSKI_README_COVERS
+    /// is a folder with 1.jpg to 5.jpg (drawn ones otherwise). Run
+    /// with LOSKI_README_OUT set to a folder:
+    /// `cargo test readme_pictures -- --ignored`.
     #[test]
     #[ignore]
     fn readme_pictures() {
@@ -677,12 +687,19 @@ mod tests {
             return;
         };
         let songs = [
-            ("Paper Lanterns", "The Night Shift"),
-            ("Glass Harbor", "Mira Vale"),
-            ("Static Summer", "Low Tide Club"),
-            ("Neon Orchards", "Juno Park"),
-            ("Afterglow Avenue", "The Night Shift"),
+            ("Crawl", "Breaking Benjamin"),
+            ("Gherila PTM", "B.U.G. Mafia"),
+            ("Zi de zi", "B.U.G. Mafia"),
+            ("Rein Raus", "Rammstein"),
+            ("Inis Mona", "Eluveitie"),
         ];
+        let covers = std::env::var("LOSKI_README_COVERS").ok();
+        let cover = |i: usize| {
+            covers
+                .as_ref()
+                .and_then(|dir| image::open(format!("{dir}/{}.jpg", i + 1)).ok())
+                .map_or_else(|| art(i), |cover| cover.to_rgb8())
+        };
         let jane = std::env::var("LOSKI_README_COVER")
             .ok()
             .and_then(|path| image::open(path).ok())
@@ -696,6 +713,7 @@ mod tests {
                 year: Some(2006),
                 duration_ms: 200_000,
                 explicit: false,
+                genre: Some("Alternative metal".into()),
             },
             crate::banner::Style::Glass,
         )
@@ -712,9 +730,9 @@ mod tests {
             headline: "31h 12m".into(),
             subline: "of music · 412 plays · 96 songs · 41 artists".into(),
             chips: vec![
+                "Loski played 52h 40m".into(),
                 "9-day streak".into(),
-                "+4 hr vs Sep 1–25".into(),
-                "Mostly indie pop".into(),
+                "Mostly hip hop".into(),
             ],
             bars: minutes
                 .iter()
@@ -735,21 +753,21 @@ mod tests {
                     title: title.to_string(),
                     artist: artist.to_string(),
                     plays: format!("{} plays", 23 - i * 3),
-                    cover: Some(art(i)),
+                    cover: Some(cover(i)),
                 })
                 .collect(),
             artists: vec![
                 Artist {
-                    name: "The Night Shift".into(),
-                    detail: "41 plays · 2 hr 31 min".into(),
+                    name: "B.U.G. Mafia".into(),
+                    detail: "37 plays · 2 hr 26 min".into(),
                 },
                 Artist {
-                    name: "Mira Vale".into(),
-                    detail: "18 plays · 58 min".into(),
+                    name: "Breaking Benjamin".into(),
+                    detail: "23 plays · 1 hr 32 min".into(),
                 },
                 Artist {
-                    name: "Low Tide Club".into(),
-                    detail: "12 plays · 40 min".into(),
+                    name: "Rammstein".into(),
+                    detail: "14 plays · 45 min".into(),
                 },
             ],
         };
@@ -766,14 +784,15 @@ mod tests {
             headline: "41,230 minutes".into(),
             subline: "of music · 9,812 plays · 1,204 songs · 380 artists".into(),
             tiles: vec![
-                tile("TOP SONG", "Paper Lanterns", "The Night Shift · 182 plays"),
-                tile("TOP ARTIST", "The Night Shift", "912 plays · 61 hours"),
+                tile("TOP SONG", "Crawl", "Breaking Benjamin · 182 plays"),
+                tile("TOP ARTIST", "B.U.G. Mafia", "912 plays · 61 hours"),
                 tile("BIGGEST DAY", "Saturday, March 14", "5 hours 12 minutes"),
                 tile("LONGEST STREAK", "23 days", "in a row with music"),
                 tile("LISTENED WITH MOST", "David", "41 hours together"),
-                tile("TOP GENRE", "Indie pop", "then dream pop and synthwave"),
+                tile("TOP GENRE", "Hip hop", "then alternative and folk metal"),
             ],
-            cover: Some(art(0)),
+            aside: Some("LOSKI PLAYED 1,240 HOURS IN ALL".into()),
+            cover: Some(cover(0)),
         };
         std::fs::write(format!("{dir}/wrapped.jpg"), render_wrapped(&wrapped)).unwrap();
     }

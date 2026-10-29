@@ -155,7 +155,8 @@ function Test-Image {
 # network, or the image isn't public yet), so the caller can build instead.
 function Update-Image {
     Write-Step 'Downloading the latest Loski image'
-    docker compose pull
+    # Loski's own image only: the graphics-card voice is built on this computer.
+    docker compose pull loski
     if ($LASTEXITCODE -eq 0) { return $true }
     Write-Problem "Couldn't download it (see above), so building it from this folder instead."
     return $false

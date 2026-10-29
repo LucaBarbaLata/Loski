@@ -43,6 +43,8 @@ use crate::{
 
 /// How often the progress bar moves while a song plays.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10);
+/// How often a lost panel is tried again.
+const RETRY_LOST: Duration = Duration::from_secs(15);
 /// Small changes (volume, repeat) are batched for this long.
 const DEBOUNCE: Duration = Duration::from_millis(900);
 const QUEUE_PAGE_SIZE: usize = 10;
@@ -73,10 +75,19 @@ pub struct Look {
 }
 
 struct UiState {
+    /// The chat of the voice channel Loski is in: the panel's own place.
     home: Option<Id<ChannelMarker>>,
     /// The panel channel picked in /settings; it beats `home`.
     fixed: Option<Id<ChannelMarker>>,
+    /// Where /panel brought it, until Loski leaves the call; it beats both.
+    here: Option<Id<ChannelMarker>>,
+    /// Where the last command was used, for when the voice channel's chat
+    /// won't take the panel.
+    asked: Option<Id<ChannelMarker>>,
     panel: Option<PanelRef>,
+    /// The panel couldn't be updated or posted (a network blip, say): it's
+    /// posted again shortly.
+    lost: bool,
     /// The banner uploaded with the current panel, and the song it shows.
     banner: Option<(SpotifyId, String)>,
     color: u32,
@@ -98,7 +109,10 @@ impl Default for Ui {
             state: Mutex::new(UiState {
                 home: None,
                 fixed: None,
+                here: None,
+                asked: None,
                 panel: None,
+                lost: false,
                 banner: None,
                 color: color::BRAND,
                 dirty: false,
@@ -111,16 +125,47 @@ impl Default for Ui {
 }
 
 impl Ui {
+    /// Loski joined a voice channel: the panel lives in its chat.
     pub fn set_home(&self, channel: Id<ChannelMarker>) {
         self.state.lock().home = Some(channel);
     }
 
-    pub fn home(&self) -> Option<Id<ChannelMarker>> {
-        let st = self.state.lock();
-        st.fixed.or(st.home)
+    /// A command was used here: where the panel goes if the voice
+    /// channel's chat won't take it.
+    pub fn asked_from(&self, channel: Id<ChannelMarker>) {
+        self.state.lock().asked = Some(channel);
     }
 
-    /// Keeps the panel in one channel (`None`: wherever /play was used).
+    /// /panel: the panel stays here until Loski leaves the call.
+    pub fn put_here(&self, channel: Id<ChannelMarker>) {
+        self.state.lock().here = Some(channel);
+    }
+
+    /// The call is over: the next one's panel goes back to its own place.
+    pub fn call_over(&self) {
+        self.state.lock().here = None;
+    }
+
+    /// Where the panel goes: where /panel brought it, the channel picked
+    /// in /settings, or the voice channel's chat.
+    pub fn home(&self) -> Option<Id<ChannelMarker>> {
+        let st = self.state.lock();
+        st.here.or(st.fixed).or(st.home).or(st.asked)
+    }
+
+    /// The voice channel's chat wouldn't take the panel (no permission to
+    /// post there, say): where the last command was used instead.
+    fn fall_back(&self, failed: Id<ChannelMarker>) -> Option<Id<ChannelMarker>> {
+        let mut st = self.state.lock();
+        if st.here.is_some() || st.fixed.is_some() || st.home != Some(failed) {
+            return None;
+        }
+        let other = st.asked.filter(|a| *a != failed)?;
+        st.home = Some(other);
+        Some(other)
+    }
+
+    /// Keeps the panel in one channel (`None`: the voice channel's chat).
     pub fn set_fixed(&self, channel: Option<Id<ChannelMarker>>) {
         self.state.lock().fixed = channel;
     }
@@ -149,6 +194,7 @@ impl Ui {
     pub(super) fn take_panel(&self) -> Option<PanelRef> {
         let mut st = self.state.lock();
         st.banner = None;
+        st.lost = false;
         st.panel.take()
     }
 
@@ -243,6 +289,19 @@ async fn on_notice(app: &Arc<App>, core: &Core, notice: Notice) {
 }
 
 async fn refresh_if_due(app: &App, core: &Core) {
+    let retry = {
+        let mut st = app.ui.state.lock();
+        let due = st.lost && st.panel.is_none() && st.last_edit.elapsed() >= RETRY_LOST;
+        if due {
+            st.last_edit = Instant::now();
+        }
+        due
+    };
+    if retry {
+        tracing::info!("Putting the panel back up after it couldn't be updated");
+        repost(app, core).await;
+        return;
+    }
     let panel = {
         let st = app.ui.state.lock();
         let since = st.last_edit.elapsed();
@@ -272,18 +331,80 @@ async fn refresh_if_due(app: &App, core: &Core) {
         .components(Some(&components))
         .await;
     if let Err(e) = edit {
-        tracing::debug!("panel edit failed, it'll be reposted with the next song: {e}");
+        tracing::warn!("couldn't update the panel ({e}); it'll be put back up shortly");
         let mut st = app.ui.state.lock();
         if st.panel == Some(panel) {
             st.panel = None;
+            st.lost = true;
         }
     }
+}
+
+/// What's playing, for /nowplaying: the song, where it's at and what's
+/// next. Only whoever asked sees it.
+pub fn now_card(app: &App, snap: &Snapshot) -> Component {
+    let icons = &app.icons;
+    let Some(track) = &snap.track else {
+        return cards::info(icons, personality::nothing_playing());
+    };
+    let paused = snap.status == Status::Paused;
+    let explicit = if track.explicit { "  `Explicit`" } else { "" };
+    let mut about = Vec::new();
+    if !track.album.is_empty() {
+        about.push(escape_md(&track.album));
+    }
+    about.extend(track.year.map(|year| year.to_string()));
+    about.extend(app.genres.top_of(&track.artists));
+    let mut lines = vec![
+        format!(
+            "{} **[{}]({})**{explicit}",
+            icons.md(if paused { Icon::Pause } else { Icon::Play }),
+            escape_md(&track.title),
+            track.url()
+        ),
+        escape_md(&track.artists_joined()),
+    ];
+    if !about.is_empty() {
+        lines.push(format!("-# {}", about.join(" · ")));
+    }
+    lines.push(format!(
+        "`{}` {} `{}`{}",
+        fmt_ms(snap.position_ms as u64),
+        progress_bar(icons, snap.position_ms, track.duration_ms),
+        fmt_ms(track.duration_ms as u64),
+        if paused { " · paused" } else { "" }
+    ));
+    let mut notes = Vec::new();
+    match &track.from {
+        Some(from) if !snap.following && !snap.connect => notes.push(format!("From {from}")),
+        _ => {}
+    }
+    if let Some(friend) = track.requested_by {
+        notes.push(format!("asked for by <@{friend}>"));
+    }
+    if let Some(next) = snap.up_next.first().filter(|_| !snap.following) {
+        notes.push(format!(
+            "up next: **{}** by {}",
+            escape_md(&truncate(&next.title, 60)),
+            escape_md(&truncate(&next.artists_joined(), 40))
+        ));
+    }
+    let mut parts = vec![cards::text_with_cover(
+        lines.join("\n"),
+        track.cover_thumb_url.as_deref(),
+    )];
+    if !notes.is_empty() {
+        parts.push(cards::text(format!("-# {}", notes.join(" · "))));
+    }
+    cards::card(Some(app.ui.color()), parts)
 }
 
 /// Puts a fresh panel at the bottom of the home channel. If the current
 /// panel is already the last message there, it's edited instead (no flicker).
 pub async fn repost(app: &App, core: &Core) {
-    let Some(home) = app.ui.home() else { return };
+    let Some(mut home) = app.ui.home() else {
+        return;
+    };
     // A new session is starting: the last one's recap makes way.
     if let Some((channel, message)) = app.ui.take_recap() {
         let _ = app.http.delete_message(channel, message).await;
@@ -291,7 +412,16 @@ pub async fn repost(app: &App, core: &Core) {
     let snap = core.engine.snapshot();
     let look = app.look();
     let banner = match &snap.track {
-        Some(track) if !look.compact => banner::for_track(&app.web, track, look.style).await,
+        Some(track) if !look.compact => {
+            let genre = app.genres.top_of(&track.artists);
+            // The songs coming up get theirs looked up ahead of time.
+            app.genres.want(
+                snap.up_next
+                    .iter()
+                    .flat_map(|t| t.artists.iter().map(String::as_str)),
+            );
+            banner::for_track(&app.web, track, look.style, genre).await
+        }
         _ => None,
     };
     let attachments: Vec<Attachment> = banner
@@ -329,25 +459,28 @@ pub async fn repost(app: &App, core: &Core) {
         }
     }
     if posted.is_none() {
-        match app
-            .http
-            .create_message(home)
-            .flags(cards::V2)
-            .attachments(&attachments)
-            .components(&components)
-            .await
+        posted = post(app, home, &attachments, &components).await;
+        if posted.is_none()
+            && let Some(other) = app.ui.fall_back(home)
         {
-            Ok(response) => posted = Posted::read(response).await,
-            Err(e) => tracing::warn!("could not post the now playing panel: {e}"),
+            tracing::warn!(
+                "Loski can't post in the voice channel's chat, so the panel goes where /play was used. Let its role send messages in voice channels to keep it there."
+            );
+            home = other;
+            posted = post(app, home, &attachments, &components).await;
         }
     }
 
     let Some(posted) = posted else {
-        tracing::warn!("Discord's reply to the panel couldn't be read; it won't update this song");
+        tracing::warn!("the panel couldn't be posted; trying again shortly");
+        let mut st = app.ui.state.lock();
+        st.lost = true;
+        st.last_edit = Instant::now();
         return;
     };
     let mut st = app.ui.state.lock();
     st.panel = Some((home, posted.id));
+    st.lost = false;
     // Later edits point at the uploaded file instead of re-sending it. If
     // Discord doesn't say where it went, they refer to it by name.
     st.banner = match (&snap.track, banner.is_some()) {
@@ -356,6 +489,29 @@ pub async fn repost(app: &App, core: &Core) {
     };
     st.dirty = false;
     st.last_edit = Instant::now();
+}
+
+/// Posts a new panel in `channel`.
+async fn post(
+    app: &App,
+    channel: Id<ChannelMarker>,
+    attachments: &[Attachment],
+    components: &[Component],
+) -> Option<Posted> {
+    match app
+        .http
+        .create_message(channel)
+        .flags(cards::V2)
+        .attachments(attachments)
+        .components(components)
+        .await
+    {
+        Ok(response) => Posted::read(response).await,
+        Err(e) => {
+            tracing::warn!("could not post the now playing panel: {e}");
+            None
+        }
+    }
 }
 
 /// What Loski keeps from a posted panel. Read from Discord's raw reply, so
@@ -514,7 +670,7 @@ pub fn now_playing_card(
             parts.push(cards::image(url, &alt));
         }
         None => {
-            let explicit = if track.explicit { "  `E`" } else { "" };
+            let explicit = if track.explicit { "  `Explicit`" } else { "" };
             let mut heading = format!(
                 "### [{}]({}){explicit}\n**{}**",
                 escape_md(&truncate(&track.title, 90)),
@@ -711,7 +867,11 @@ fn room_line(icons: &Icons, room: &RoomView) -> Option<Component> {
     if room.listeners.is_empty() {
         return None;
     }
-    let mut text = format!("-# LISTENING\n{}", friends::names_list(&room.listeners, 4));
+    // A mic by the names of the people I listen to for voice commands.
+    let mut text = format!(
+        "-# LISTENING\n{}",
+        friends::marked_names_list(&room.listeners, 4, &room.heard, &icons.md(Icon::Lyrics))
+    );
     if !room.liked_by.is_empty() {
         text.push_str(&format!(
             "  ·  {} {}",
@@ -1013,16 +1173,18 @@ pub fn queue_card(
 
     let mut buttons = Vec::new();
     if pages > 1 {
+        // Marked, as "Back" above can lead to the same page and Discord
+        // turns down a card where two buttons share an id.
         buttons.push(
             Btn::icon(
-                &format!("loski:qpage:{}", page.saturating_sub(1)),
+                &format!("loski:qpage:{}:prev", page.saturating_sub(1)),
                 Icon::Left,
             )
             .disabled(page == 0)
             .build(icons),
         );
         buttons.push(
-            Btn::icon(&format!("loski:qpage:{}", page + 1), Icon::Right)
+            Btn::icon(&format!("loski:qpage:{}:next", page + 1), Icon::Right)
                 .disabled(page + 1 >= pages)
                 .build(icons),
         );

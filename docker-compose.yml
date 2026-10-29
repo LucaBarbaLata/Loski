@@ -20,3 +20,28 @@ services:
     init: true
     restart: on-failure
     stop_grace_period: 5s
+
+  # The graphics-card voice for talking back (beta): Chatterbox on an NVIDIA
+  # card. Only with COMPOSE_PROFILES=gpu-voice in .env; see INSTALLATION.md.
+  # Loski reaches it on this network only, at http://voice:8800.
+  voice:
+    profiles: [gpu-voice]
+    build: ./voice
+    image: loski-voice
+    pull_policy: build
+    container_name: loski-voice
+    volumes:
+      - voice-model:/models
+    restart: on-failure
+    stop_grace_period: 5s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  # The voice's model, about 3 GB, kept between updates.
+  voice-model:

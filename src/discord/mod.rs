@@ -376,6 +376,7 @@ pub async fn run(cfg: Arc<Config>, claim: Option<String>) -> Result<()> {
     tokio::spawn(profile::sync(app.clone()));
     tokio::spawn(hearing::run(app.clone(), heard));
     tokio::spawn(hearing::wake(app.clone()));
+    tokio::spawn(hearing::keep_talking(app.clone()));
     tokio::spawn(updates::check_loop(app.clone()));
     tokio::spawn(init_core(app.clone()));
 

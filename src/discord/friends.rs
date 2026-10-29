@@ -49,8 +49,8 @@ pub enum Access {
 /// Who may use a slash command (or a right-click command, by its name).
 pub fn command_needs(name: &str) -> Access {
     match name {
-        "request" | "lyrics" | "help" | "voice" => Access::Listener,
-        "play" | "queue" | "nowplaying" | "join" => Access::Queue,
+        "request" | "lyrics" | "help" | "voice" | "nowplaying" => Access::Listener,
+        "play" | "queue" | "panel" | "join" => Access::Queue,
         menu if library::is_queue_menu(menu) => Access::Queue,
         "settings" | "stats" | "wrapped" | "history" | "mix" | "follow" | "liked" | "playlist"
         | "status" | "normalize" | "customize" | "24-7" => Access::Owner,
@@ -82,8 +82,9 @@ pub fn component_needs(id: &str) -> Access {
         "loski:voice:",
         "req:vote:",
     ];
-    const QUEUE: [&str; 9] = [
+    const QUEUE: [&str; 10] = [
         "loski:queue",
+        "loski:vpick:",
         "loski:qpage:",
         "loski:qsel:",
         "loski:qclose",
@@ -348,6 +349,8 @@ pub fn vote_skip(app: &App, track: &Arc<TrackInfo>, user: u64) -> Result<(usize,
 #[derive(Debug, Clone, Default)]
 pub struct RoomView {
     pub listeners: Vec<String>,
+    /// Of those, who I listen to for voice commands.
+    pub heard: Vec<String>,
     pub liked_by: Vec<String>,
     /// Votes to skip this song so far, and how many it takes.
     pub votes: Option<(usize, usize)>,
@@ -355,11 +358,22 @@ pub struct RoomView {
 
 pub fn room_view(app: &App, track: Option<&TrackInfo>) -> RoomView {
     let people = listeners(app);
+    let heard = if app.ears.listening() {
+        let said_yes = app.prefs().voice_people;
+        people
+            .iter()
+            .filter(|l| said_yes.contains(&l.id))
+            .map(|l| l.name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let st = app.room.state.lock();
     let same = track.is_some() && st.track.as_ref().map(|t| t.id) == track.map(|t| t.id);
     if !same {
         return RoomView {
             listeners: people.into_iter().map(|l| l.name).collect(),
+            heard,
             ..RoomView::default()
         };
     }
@@ -368,6 +382,7 @@ pub fn room_view(app: &App, track: Option<&TrackInfo>) -> RoomView {
         liked_by: st.likes.values().cloned().collect(),
         votes: (votes > 0).then_some((votes, people.len() / 2 + 1)),
         listeners: people.into_iter().map(|l| l.name).collect(),
+        heard,
     }
 }
 
@@ -431,10 +446,22 @@ pub fn friends_liked(app: &App) -> Vec<String> {
 
 /// "**Luca**, **Ana** and 3 more".
 pub fn names_list(names: &[String], shown: usize) -> String {
+    marked_names_list(names, shown, &[], "")
+}
+
+/// `names_list` with `mark` after each name that's in `marked`.
+pub fn marked_names_list(names: &[String], shown: usize, marked: &[String], mark: &str) -> String {
     let mut list: Vec<String> = names
         .iter()
         .take(shown)
-        .map(|n| format!("**{}**", escape_md(&truncate(n, 32))))
+        .map(|n| {
+            let name = format!("**{}**", escape_md(&truncate(n, 32)));
+            if marked.contains(n) {
+                format!("{name} {mark}")
+            } else {
+                name
+            }
+        })
         .collect();
     let more = names.len().saturating_sub(shown);
     match (list.len(), more) {

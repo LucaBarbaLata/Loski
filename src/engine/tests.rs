@@ -151,6 +151,7 @@ impl Harness {
             connect_up_next: Vec::new(),
             audience: Vec::new(),
             alone: false,
+            played_clock: Default::default(),
         };
         Self {
             engine: Engine {

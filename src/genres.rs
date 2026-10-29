@@ -52,6 +52,19 @@ impl Genres {
         self.known.lock().clone()
     }
 
+    /// The genre of the first of `artists` that has one known, the one most
+    /// agreed on. Artists not looked up yet are, for next time.
+    pub fn top_of(&self, artists: &[String]) -> Option<String> {
+        let found = {
+            let known = self.known.lock();
+            artists
+                .iter()
+                .find_map(|a| known.get(&a.to_lowercase())?.first().cloned())
+        };
+        self.want(artists.iter().map(String::as_str));
+        found.map(|genre| display(&genre))
+    }
+
     /// Asks for these artists to be looked up, the first ones first.
     pub fn want<'a>(&self, artists: impl IntoIterator<Item = &'a str>) {
         let known = self.known.lock();

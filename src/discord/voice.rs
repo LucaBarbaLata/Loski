@@ -168,6 +168,13 @@ struct DropWatch {
 #[async_trait::async_trait]
 impl EventHandler for DropWatch {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::DriverReconnect(data) = ctx {
+            tracing::info!(
+                "voice reconnected by itself (to {} in channel {:?})",
+                data.server,
+                data.channel_id
+            );
+        }
         if let EventContext::DriverDisconnect(data) = ctx
             // No reason means we asked to leave or move.
             && let Some(reason) = &data.reason
@@ -200,6 +207,10 @@ pub async fn join(
     connect(app, core, guild, channel).await?;
     if previous.is_some() {
         show_song(app, core.engine.current_track().as_deref()).await;
+        // The panel comes along to the new channel's chat.
+        if app.ui.has_panel() {
+            panel::repost(app, core).await;
+        }
     }
     Ok(())
 }
@@ -249,13 +260,15 @@ async fn set_status(app: &App, channel: Id<ChannelMarker>, status: &str) {
 /// a watcher for dropped connections, and ears (see `hearing.rs`).
 fn set_up_events(app: &App, call: &mut Call) {
     call.remove_all_global_events();
-    call.add_global_event(
-        Event::Core(CoreEvent::DriverDisconnect),
-        DropWatch {
-            heal: app.voice.heal.clone(),
-            dropped: app.voice.dropped.clone(),
-        },
-    );
+    for event in [CoreEvent::DriverDisconnect, CoreEvent::DriverReconnect] {
+        call.add_global_event(
+            Event::Core(event),
+            DropWatch {
+                heal: app.voice.heal.clone(),
+                dropped: app.voice.dropped.clone(),
+            },
+        );
+    }
     hearing::add_events(call, &app.ears);
 }
 
@@ -284,18 +297,17 @@ async fn connect(
         .join(guild, channel)
         .await
         .map_err(|e| oops(format!("I couldn't join your voice channel: {e}")))?;
+    // Asked before taking the call's lock, which Discord's events need too.
+    let alive = output_alive(core).await;
     let mut call = call.lock().await;
     call.set_bitrate(bitrate(app, guild));
     hearing::set_deaf(&mut call, &app.ears).await;
 
-    let alive = match core.engine.output() {
-        Some(handle) => handle
-            .get_info()
-            .await
-            .is_ok_and(|state| !state.playing.is_done()),
-        None => false,
-    };
     if !alive {
+        // One stream at a time: an old one that stopped answering goes.
+        if let Some(old) = core.engine.output() {
+            let _ = old.stop();
+        }
         let handle = call.play_input(output_input(core));
         let _ = handle.add_event(
             Event::Track(TrackEvent::Error),
@@ -311,6 +323,8 @@ async fn connect(
         st.guild = Some(guild);
         st.channel = Some(channel);
     }
+    // The voice channel's own chat is where the panel lives.
+    app.ui.set_home(channel);
     remember_channel(app);
     friends::people_changed(app);
     Ok(())
@@ -336,12 +350,21 @@ async fn voice_ok(app: &App, core: &Core) -> bool {
     if app.voice.dropped.swap(false, Ordering::Relaxed) || app.songbird.get(guild).is_none() {
         return false;
     }
-    match core.engine.output() {
-        Some(handle) => handle
-            .get_info()
-            .await
-            .is_ok_and(|state| !state.playing.is_done()),
-        None => false,
+    output_alive(core).await
+}
+
+/// Whether Loski's audio stream is still playing into the call. An answer
+/// that doesn't come in a few seconds (songbird mid-reconnect) counts as no.
+async fn output_alive(core: &Core) -> bool {
+    let Some(handle) = core.engine.output() else {
+        return false;
+    };
+    match tokio::time::timeout(Duration::from_secs(3), handle.get_info()).await {
+        Ok(info) => info.is_ok_and(|state| !state.playing.is_done()),
+        Err(_) => {
+            tracing::warn!("the audio stream didn't answer; starting a new one");
+            false
+        }
     }
 }
 
@@ -425,6 +448,7 @@ pub async fn leave(app: &Arc<App>, farewell: Option<&str>) {
         app.announce(home, cards::info(&app.icons, text), SHORT_SECS)
             .await;
     }
+    app.ui.call_over();
 }
 
 /// Leaves until you call Loski back: `/stop`, the sleep timer, or someone
@@ -559,10 +583,6 @@ pub async fn come_back(app: Arc<App>) {
     if app.voice.guild().is_some() {
         return;
     }
-    if app.ui.home().is_none() {
-        // The voice channel's own text chat.
-        app.ui.set_home(channel);
-    }
     match join(&app, core, guild, channel).await {
         Ok(()) => {
             tracing::info!("24/7: back in voice after a restart");
@@ -639,10 +659,6 @@ pub async fn join_for_connect(app: &Arc<App>, core: &Core) {
         .await;
         return;
     };
-    if app.ui.home().is_none() {
-        // The voice channel's own text chat.
-        app.ui.set_home(channel);
-    }
     if let Err(e) = join(app, core, guild, channel).await {
         tracing::warn!("couldn't join voice for Spotify Connect: {e:#}");
         core.engine.connect_pause();

@@ -68,6 +68,14 @@ pub struct Prefs {
     pub voice: bool,
     /// Who said yes to voice commands (Discord user ids).
     pub voice_people: Vec<u64>,
+    /// Talking back: replies to voice commands said out loud.
+    pub talk: bool,
+    /// The voice Loski talks back in (see `talk::VOICES`).
+    pub talk_voice: Option<String>,
+    /// Other names Loski answers to in voice commands.
+    pub voice_names: Vec<String>,
+    /// The speech model picked for voice commands (see `speech::MODELS`).
+    pub voice_model: Option<String>,
 }
 
 /// One song you listened to. Entries from before listening time was
@@ -151,6 +159,10 @@ pub struct Store {
     write_lock: Mutex<()>,
 }
 
+/// How long Loski played music in each hour (Unix hours), anyone listening
+/// or not: what /stats and Wrapped call "Loski played".
+pub type PlayedHours = std::collections::BTreeMap<i64, u64>;
+
 /// History is trimmed back to this many entries once it grows past twice that.
 const HISTORY_KEEP: usize = 5_000;
 
@@ -190,6 +202,28 @@ impl Store {
         let json = serde_json::to_string_pretty(prefs).expect("prefs serialize");
         if let Err(e) = write_atomic(&self.dir.join("preferences.json"), json.as_bytes()) {
             tracing::warn!("could not save your settings: {e}");
+        }
+    }
+
+    pub fn played_hours(&self) -> PlayedHours {
+        fs::read_to_string(self.dir.join("played.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Adds `ms` of playing to Unix hour `hour`.
+    pub fn add_played(&self, hour: i64, ms: u64) {
+        let _guard = self.write_lock.lock();
+        let path = self.dir.join("played.json");
+        let mut hours: PlayedHours = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        *hours.entry(hour).or_default() += ms;
+        let json = serde_json::to_string(&hours).expect("played serialize");
+        if let Err(e) = write_atomic(&path, json.as_bytes()) {
+            tracing::warn!("could not save how long I've played: {e}");
         }
     }
 

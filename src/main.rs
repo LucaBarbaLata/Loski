@@ -15,6 +15,7 @@ mod speech;
 mod spotify;
 mod stats;
 mod store;
+mod talk;
 mod track;
 #[cfg(unix)]
 mod user;

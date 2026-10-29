@@ -54,9 +54,32 @@ fn text_len(component: &Component) -> usize {
     }
 }
 
+/// Every button, menu and field's id, in order.
+fn custom_ids(component: &Component, ids: &mut Vec<String>) {
+    match component {
+        Component::ActionRow(row) => row.components.iter().for_each(|c| custom_ids(c, ids)),
+        Component::Container(c) => c.components.iter().for_each(|c| custom_ids(c, ids)),
+        Component::Section(s) => {
+            s.components.iter().for_each(|c| custom_ids(c, ids));
+            custom_ids(&s.accessory, ids);
+        }
+        Component::Button(b) => ids.extend(b.custom_id.clone()),
+        Component::SelectMenu(m) => ids.push(m.custom_id.clone()),
+        Component::TextInput(t) => ids.push(t.custom_id.clone()),
+        _ => {}
+    }
+}
+
 fn assert_valid(card: Component) {
     if let Err(e) = twilight_validate::message::components(std::slice::from_ref(&card), true) {
         panic!("invalid card: {e}\n{card:#?}");
+    }
+    // Discord turns down a message where two components share an id.
+    let mut ids = Vec::new();
+    custom_ids(&card, &mut ids);
+    let mut seen = std::collections::HashSet::new();
+    for id in &ids {
+        assert!(seen.insert(id), "two components share the id {id}");
     }
     // Discord also caps all the text in one message at 4,000 characters.
     assert!(
@@ -153,11 +176,13 @@ fn rooms(long: bool) -> [super::friends::RoomView; 3] {
         super::friends::RoomView::default(),
         super::friends::RoomView {
             listeners: names(3),
+            heard: names(2),
             liked_by: names(1),
             votes: None,
         },
         super::friends::RoomView {
             listeners: names(25),
+            heard: names(25),
             liked_by: names(25),
             votes: Some((7, 13)),
         },
@@ -374,7 +399,7 @@ fn command_definitions_are_valid() {
         "Thirty Two Characters Long Name!",
     ] {
         let definitions = commands::definitions(bot);
-        assert_eq!(definitions.len(), 40);
+        assert_eq!(definitions.len(), 41);
         for command in &definitions {
             if let Err(e) = twilight_validate::command::command(command) {
                 panic!("/{} is invalid for {bot}: {e}", command.name);
@@ -777,8 +802,19 @@ fn party_mode_plays_the_most_voted_first() {
 
 #[test]
 fn voice_card_is_valid() {
-    use super::hearing::{VoiceView, voice_card};
+    use super::hearing::{Note, VoiceView, voice_card};
     let icons = Icons::default();
+    let notes: Vec<Note> = (0..5)
+        .map(|i| Note {
+            at: 1_793_000_000 + i,
+            user: 1,
+            who: "David *DJ*".repeat(9),
+            text: "Loski, play ".to_string() + &"a very long song title ".repeat(9),
+            outcome: "**Numb** by Linkin Park, coming up.".to_string(),
+            took_ms: 312,
+            for_me: i % 2 == 0,
+        })
+        .collect();
     for owner in [false, true] {
         for (on, busy, cpu_ok) in [
             (false, false, true),
@@ -796,6 +832,19 @@ fn voice_card_is_valid() {
                         cpu_ok,
                         me,
                         heard_here,
+                        last_heard: if me { notes.clone() } else { Vec::new() },
+                        talk: me.then(|| "lessac".to_string()),
+                        talk_busy: busy,
+                        talk_ok: cpu_ok,
+                        server_ok: on,
+                        names: if owner {
+                            vec!["DJ".to_string(), "Lowski *x*".repeat(3)]
+                        } else {
+                            Vec::new()
+                        },
+                        in_call: me,
+                        model: &crate::speech::MODELS[usize::from(me)],
+                        typical_ms: on.then_some(if me { 2400 } else { 380 }),
                     };
                     assert_valid(voice_card(&icons, &view));
                 }

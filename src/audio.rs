@@ -8,6 +8,7 @@
 use std::{
     collections::VecDeque,
     f32::consts::FRAC_PI_2,
+    f64::consts::PI,
     io::{self, Read, Seek, SeekFrom},
     sync::{
         Arc,
@@ -49,6 +50,23 @@ const SILENCE: f32 = 0.0005;
 const MAX_LEAD_TRIM_FRAMES: usize = SAMPLE_RATE as usize * 3;
 /// How quickly the limiter lets go after a peak (about 150 ms).
 const LIMIT_RELEASE: f32 = 1.0 / (0.15 * SAMPLE_RATE as f32);
+/// Loski's own voice (talking back) is evened out to this level, so every
+/// line is as loud as the last (about -20 dBFS while speaking)…
+const TALK_RMS: f32 = 0.1;
+/// …played at this share of it at full volume…
+const TALK_LEVEL: f32 = 0.8;
+/// …and never quieter than at half volume, so it's heard with the music low.
+const TALK_LEAST_VOLUME: f32 = 0.5;
+/// The music while Loski talks: 16 dB down.
+const DUCK_DB: f32 = -16.0;
+/// The music fades down over this long before Loski starts talking…
+const DUCK_FADE_SECS: f32 = 0.4;
+/// …stays down this long after it's done…
+const DUCK_HOLD_SECS: f32 = 0.3;
+/// …and comes back gradually over this long.
+const DUCK_RETURN_SECS: f32 = 1.2;
+/// Half the width of the resampler's window, in samples: plenty for a voice.
+const LANCZOS: i64 = 8;
 
 fn is_silent(frame: &[f32]) -> bool {
     frame.iter().all(|s| s.abs() < SILENCE)
@@ -248,6 +266,8 @@ pub struct Mixer {
     mix: Mutex<Mix>,
     fade_finished: AtomicBool,
     controls: Mutex<Controls>,
+    /// Loski talking back, at the mixer's rate in stereo, still to be heard.
+    talk: Mutex<VecDeque<f32>>,
 }
 
 impl Mixer {
@@ -262,7 +282,35 @@ impl Mixer {
                 gate_target: 1.0,
                 gate_ramp_frames: 1.0,
             }),
+            talk: Mutex::new(VecDeque::new()),
         })
+    }
+
+    /// Loski says something in the call: `mono` at `rate`, over the music.
+    /// The music fades down first, and comes back gradually after. It cuts
+    /// off anything still being said.
+    pub fn say(&self, mono: &[f32], rate: u32) -> Duration {
+        let voice = to_stereo(&even_out(mono), rate);
+        let silence = |secs: f32| vec![0.0; (secs * SAMPLE_RATE as f32) as usize * CHANNELS];
+        let mut talk = self.talk.lock();
+        talk.clear();
+        // Silence while the music fades down, the voice, then a moment's
+        // hold before the music comes back.
+        talk.extend(silence(DUCK_FADE_SECS + 0.05));
+        talk.extend(voice);
+        talk.extend(silence(DUCK_HOLD_SECS));
+        Duration::from_secs_f64(talk.len() as f64 / (CHANNELS as f64 * SAMPLE_RATE as f64))
+    }
+
+    /// Moves up to `out.len()` samples of Loski talking into `out`, and
+    /// returns how many.
+    fn take_talk(&self, out: &mut [f32]) -> usize {
+        let mut talk = self.talk.lock();
+        let n = out.len().min(talk.len());
+        for (o, s) in out.iter_mut().zip(talk.drain(..n)) {
+            *o = s;
+        }
+        n
     }
 
     pub fn set_filter(&self, filter: Filter) {
@@ -308,7 +356,7 @@ impl Mixer {
     }
 
     pub fn is_silent(&self) -> bool {
-        self.pipes.iter().all(Pipe::is_empty)
+        self.pipes.iter().all(Pipe::is_empty) && self.talk.lock().is_empty()
     }
 
     fn render(&self, out: &mut [f32], scratch_a: &mut Vec<f32>, scratch_b: &mut Vec<f32>) {
@@ -383,6 +431,11 @@ pub struct MixReader {
     gate: f32,
     /// The limiter's gain: 1.0 unless a peak needed taming.
     limit: f32,
+    /// Loski talking, for this chunk.
+    talk: Vec<f32>,
+    /// How far the music is turned down for Loski talking, in dB: 0 unless
+    /// it's talking.
+    duck_db: f32,
 }
 
 impl MixReader {
@@ -399,6 +452,8 @@ impl MixReader {
             volume: controls.volume,
             gate: controls.gate_target,
             limit: 1.0,
+            talk: vec![0.0; READ_CHUNK_FRAMES * CHANNELS],
+            duck_db: 0.0,
         }
     }
 
@@ -422,8 +477,17 @@ impl MixReader {
             mixer.render(buf, scratch_a, scratch_b);
         });
 
+        // Loski talking back goes over the music, after the gate, so it's
+        // heard while the music's paused too.
+        self.talk.resize(self.frame.len(), 0.0);
+        let talking = self.mixer.take_talk(&mut self.talk);
+        let talk_gain = TALK_LEVEL * controls.volume.max(TALK_LEAST_VOLUME);
+        // Steps in dB a frame, so the fades sound even.
+        let duck_down = DUCK_DB / (DUCK_FADE_SECS * SAMPLE_RATE as f32);
+        let duck_up = -DUCK_DB / (DUCK_RETURN_SECS * SAMPLE_RATE as f32);
+
         let gate_step = 1.0 / controls.gate_ramp_frames;
-        for f in self.frame.chunks_exact_mut(CHANNELS) {
+        for (i, f) in self.frame.chunks_exact_mut(CHANNELS).enumerate() {
             // About 10 ms to settle: no zipper noise when the volume changes.
             self.volume += (controls.volume - self.volume) * 0.0025;
             self.gate = if self.gate < controls.gate_target {
@@ -431,8 +495,24 @@ impl MixReader {
             } else {
                 (self.gate - gate_step).max(controls.gate_target)
             };
-            let gain = self.volume * self.gate * self.gate;
+            let speaking = i * CHANNELS < talking;
+            self.duck_db = if speaking {
+                (self.duck_db + duck_down).max(DUCK_DB)
+            } else {
+                (self.duck_db + duck_up).min(0.0)
+            };
+            let duck = if self.duck_db < 0.0 {
+                10f32.powf(self.duck_db / 20.0)
+            } else {
+                1.0
+            };
+            let gain = self.volume * self.gate * self.gate * duck;
             f.iter_mut().for_each(|s| *s *= gain);
+            if speaking {
+                for (c, s) in f.iter_mut().enumerate() {
+                    *s += self.talk[i * CHANNELS + c] * talk_gain;
+                }
+            }
 
             // Discord's encoder would clip anything past full scale harshly.
             // A boosted filter or a crossfade can get there, so the limiter
@@ -487,6 +567,55 @@ impl MediaSource for MixReader {
     }
 }
 
+/// A line of Loski's voice at `TALK_RMS` while it speaks, with its peaks
+/// kept under full scale.
+fn even_out(mono: &[f32]) -> Vec<f32> {
+    let speaking: Vec<f32> = mono.iter().copied().filter(|s| s.abs() > 0.01).collect();
+    if speaking.is_empty() {
+        return mono.to_vec();
+    }
+    let rms = (speaking.iter().map(|s| s * s).sum::<f32>() / speaking.len() as f32).sqrt();
+    let peak = speaking.iter().fold(0f32, |m, s| m.max(s.abs()));
+    let gain = (TALK_RMS / rms).min(0.95 / peak);
+    mono.iter().map(|s| s * gain).collect()
+}
+
+/// `mono` at `rate`, at the mixer's rate in stereo: windowed-sinc (Lanczos)
+/// resampling, clean where straight lines between samples would hiss.
+fn to_stereo(mono: &[f32], rate: u32) -> Vec<f32> {
+    if mono.is_empty() || rate == 0 {
+        return Vec::new();
+    }
+    let frames = (mono.len() as u64 * SAMPLE_RATE as u64 / rate as u64) as usize;
+    let step = rate as f64 / SAMPLE_RATE as f64;
+    // Going down in rate, the window widens to keep what can't be kept out.
+    let stretch = step.max(1.0);
+    let reach = (LANCZOS as f64 * stretch).ceil() as i64;
+    let mut out = Vec::with_capacity(frames * CHANNELS);
+    for i in 0..frames {
+        let pos = i as f64 * step;
+        let center = pos.floor() as i64;
+        let mut sum = 0.0;
+        for k in (center - reach + 1).max(0)..=(center + reach).min(mono.len() as i64 - 1) {
+            sum += f64::from(mono[k as usize]) * lanczos((pos - k as f64) / stretch);
+        }
+        out.extend(std::iter::repeat_n((sum / stretch) as f32, CHANNELS));
+    }
+    out
+}
+
+fn lanczos(x: f64) -> f64 {
+    let a = LANCZOS as f64;
+    if x.abs() < 1e-9 {
+        1.0
+    } else if x.abs() >= a {
+        0.0
+    } else {
+        let px = PI * x;
+        a * px.sin() * (px / a).sin() / (px * px)
+    }
+}
+
 /// librespot audio backend that writes into one deck's pipe.
 pub struct PipeSink {
     mixer: Arc<Mixer>,
@@ -524,6 +653,107 @@ mod tests {
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect()
+    }
+
+    /// The level of the last frame of `samples`.
+    fn last(samples: &[f32]) -> f32 {
+        samples[samples.len() - 1]
+    }
+
+    #[test]
+    fn music_fades_out_for_loski_talking_and_comes_back_slowly() {
+        let mixer = Mixer::new();
+        let mut reader = MixReader::new(mixer.clone());
+        let chunk = READ_CHUNK_FRAMES * CHANNELS;
+        // Music at 0.4, fed as it's played, like a deck does: 20 ms a chunk.
+        let mut play = |chunks: usize| {
+            let mut heard = Vec::new();
+            for _ in 0..chunks {
+                mixer.pipes[0].push(&vec![0.4; chunk]);
+                heard = read_samples(&mut reader, chunk);
+            }
+            last(&heard)
+        };
+        assert!((play(1) - 0.4).abs() < 0.01);
+        // Half a second of Loski talking (a steady tone at 24 kHz).
+        mixer.say(&vec![0.2; 12_000], 24_000);
+        assert!(!mixer.is_silent());
+        let ducked = 0.4 * 10f32.powf(DUCK_DB / 20.0);
+        let voice = TALK_RMS * TALK_LEVEL;
+        // 0.2 s in: the music on its way down, nothing said yet.
+        let fading = play(10);
+        assert!(fading < 0.38 && fading > ducked + 0.01, "{fading}");
+        // 0.44 s: all the way down, still nothing said.
+        assert!((play(12) - ducked).abs() < 0.01);
+        // 0.7 s: Loski talking over the quiet music.
+        assert!((play(13) - (ducked + voice)).abs() < 0.01);
+        // 1.2 s: done talking, the music held down a moment longer.
+        assert!((play(25) - ducked).abs() < 0.01);
+        // 1.8 s: coming back, but not all the way yet.
+        let returning = play(30);
+        assert!(returning > ducked + 0.01 && returning < 0.38, "{returning}");
+        // 2.6 s: back to normal, and nothing left to say.
+        assert!((play(40) - 0.4).abs() < 0.01);
+        assert!(mixer.talk.lock().is_empty());
+    }
+
+    #[test]
+    fn talking_back_is_heard_with_the_music_paused() {
+        let mixer = Mixer::new();
+        let mut reader = MixReader::new(mixer.clone());
+        mixer.fade_to(0.0, Duration::from_millis(1));
+        let _ = read_samples(&mut reader, READ_CHUNK_FRAMES * CHANNELS);
+        mixer.say(&vec![0.2; 12_000], 24_000);
+        let heard = read_samples(&mut reader, READ_CHUNK_FRAMES * CHANNELS * 35);
+        let voice = TALK_RMS * TALK_LEVEL;
+        assert!(heard.iter().any(|s| (s - voice).abs() < 0.005));
+    }
+
+    #[test]
+    fn every_line_is_as_loud_as_the_last() {
+        for level in [0.02, 0.2, 0.6] {
+            let line: Vec<f32> = (0..2_400)
+                .map(|i| level * (i as f32 * 0.05).sin())
+                .collect();
+            let even = even_out(&line);
+            // Measured as it's evened out: while speaking, not in between.
+            let speaking: Vec<f32> = line
+                .iter()
+                .zip(&even)
+                .filter(|(was, _)| was.abs() > 0.01)
+                .map(|(_, now)| *now)
+                .collect();
+            let rms = (speaking.iter().map(|s| s * s).sum::<f32>() / speaking.len() as f32).sqrt();
+            assert!((rms - TALK_RMS).abs() < 0.01, "{level}: {rms}");
+        }
+        assert_eq!(even_out(&[0.0; 10]), vec![0.0; 10]);
+    }
+
+    #[test]
+    fn voices_come_to_the_mixers_rate_cleanly() {
+        // A 1 kHz tone at 24 kHz, a tenth of a second.
+        let tone: Vec<f32> = (0..2_400)
+            .map(|i| (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 24_000.0).sin() * 0.5)
+            .collect();
+        let stereo = to_stereo(&tone, 24_000);
+        assert_eq!(stereo.len(), 4_410 * CHANNELS);
+        // Away from the edges it's the same tone at 44.1 kHz, in both ears.
+        for (i, frame) in stereo
+            .chunks_exact(CHANNELS)
+            .enumerate()
+            .skip(100)
+            .take(4_200)
+        {
+            let want =
+                (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / SAMPLE_RATE as f32).sin() * 0.5;
+            assert!(
+                (frame[0] - want).abs() < 0.005,
+                "frame {i}: {} vs {want}",
+                frame[0]
+            );
+            assert_eq!(frame[0], frame[1]);
+        }
+        assert!(to_stereo(&[], 24_000).is_empty());
     }
 
     /// Runs the stream through songbird's real probe and decoder, exactly as

@@ -206,10 +206,10 @@ fn channel_menu(view: &SettingsView) -> Component {
         disabled: false,
         kind: SelectMenuType::Channel,
         max_values: Some(1),
-        // Clearing it sends the panel back to wherever /play was used.
+        // Clearing it sends the panel back to the voice channel's chat.
         min_values: Some(0),
         options: None,
-        placeholder: Some("Panel channel: wherever you use /play".to_string()),
+        placeholder: Some("Panel channel: the voice channel's chat".to_string()),
         required: None,
     })])
 }
@@ -223,7 +223,7 @@ pub fn settings_card(icons: &Icons, view: &SettingsView) -> Component {
         cards::divider(),
         cards::text(match view.panel_channel {
             Some(channel) => format!("-# PANEL\nThe panel always goes to <#{channel}>."),
-            None => "-# PANEL\nThe panel goes wherever you last used `/play`.".to_string(),
+            None => "-# PANEL\nThe panel lives in the chat of the voice channel I'm in. `/panel` brings it somewhere else until I leave the call.".to_string(),
         }),
         channel_menu(view),
         menu(

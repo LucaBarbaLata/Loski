@@ -2,7 +2,7 @@
 
 What changed in each Loski release. Loski DMs you when a new one is out; `.\loski update` brings it in.
 
-## Unreleased
+## 3.0.0 (2026-10-29)
 
 ### Added
 
@@ -13,6 +13,17 @@ What changed in each Loski release. Loski DMs you when a new one is out; `.\losk
 - Party mode for song requests, in `/settings` → Friends: everyone in the call votes on the waiting requests, and the one with the most votes plays next, by itself.
 - Panel styles, in `/settings`: the artwork banner as Glass (as before), Vinyl (the cover as a sleeve, with the record sliding out) or Minimal (the cover beside a flat colour from it).
 - Voice commands (beta), in `/voice`: say "Loski, skip", "Loski, pause" or "Loski, play" and a song in the call. Speech is understood on the computer Loski runs on, with a 60 MB model downloaded when you turn them on, and only for people who said yes. English only for now.
+- Voice commands work with music playing from your speakers or someone else talking nearby: Loski tells speech apart from what's around it now, instead of waiting for silence that never came (on the bench, with music 10 dB under the voice, 47 of 50 commands come through, up from none). With someone else talking nearby, Loski also finds its name after what they said.
+- Talking back (beta): Loski answers voice commands out loud in the call. The music fades down before it talks and comes back gradually after. Pick a voice in `/voice`: Chatterbox, the most natural, on an NVIDIA graphics card (a container of its own, turned on with `COMPOSE_PROFILES=gpu-voice`), or simpler ones through Piper anywhere else. The usual replies are made ahead, so they come at once.
+- `/voice` laid out anew: whether Loski is listening to you, with its button beside it; the commands grouped by what they do; and your settings (talking back, the speech model, other names) together at the bottom.
+- A mic by someone's name on the panel: Loski is listening to them for voice commands.
+- Voice commands on slower computers: a **Quick** speech model to pick in `/voice` (31 MB, about 2× faster than the usual one), which `/voice` suggests when it says how long a command takes to understand on yours. A song asked for no longer gets a second listen there when the first was slow.
+- `/stats` and Wrapped say how long Loski played in all, apart from your listening: every minute, with nobody in the call and songs skipped early included. Counted from this version on.
+- More voice commands: "what's playing?", "play … next", "add …", "play my liked songs", "play my playlist …", "more like this", "repeat this song / the queue / off", "forward 30 seconds", "back 10 seconds", "sleep in 30 minutes", "stop after this song". A listener's "play …" goes on the requests card. **Not this one?** under a song played by voice opens the search for it.
+- Voice commands learn how your artists are spelled from what you play, and Loski can answer to other names, set in `/voice`. Talking about Loski at length no longer gets a "didn't get that".
+- Voice commands in two goes: say just "Loski", and the command after its "yes?".
+- Voice commands: **Last heard** on the `/voice` card (what was said to Loski, what it made of it, what it did and how fast), and a Voice commands page in `/help`.
+- `/panel`: bring the now playing panel to the channel you're in, until Loski leaves the call.
 - `/join`: bring Loski into your voice channel without playing anything yet.
 - `/24-7`: switch 24/7 on or off without opening `/settings`. Turned on while you're in a call, Loski joins you and gets the music going.
 - `INSTALLATION.md`: every way to run Loski, step by step. Windows, macOS and Linux, a server or VPS, a Raspberry Pi, a NAS or Portainer, plain `docker run` and building it yourself, plus updating, backups and moving.
@@ -23,9 +34,16 @@ What changed in each Loski release. Loski DMs you when a new one is out; `.\losk
 - On Windows, `loski start` says when Hyper-V has reserved Loski's login ports, and how to free them.
 - Loski no longer renames the bot to "Loski" on every start, or puts its own picture over one you set in Discord's developer portal. A new bot gets Loski's look, and what you change stays. `BOT_NAME` still names it.
 - The invite link also asks for Change Nickname, for a nickname of its own in a server.
+- The panel lives in the chat of the voice channel Loski is in, and stays there wherever `/play` is used (unless you picked a panel channel in `/settings`). It follows Loski to another channel. `/nowplaying` now shows what's playing, on a card only you see, and anyone can use it.
+- The banner shows the song's genre instead of "320 kbps", and explicit songs say "Explicit" instead of just "E", there and on the search card.
+- Voice commands answer short commands ("Loski, stop") that used to come out as just "L", only listen when the name comes first (so "I told Loski to stop" doesn't pause the music), and can't get stuck writing the same words over and over.
 - 24/7 keeps playing when nobody's in the call, instead of pausing until someone joins. Music played to an empty room doesn't count in your stats or history.
 
 ### Fixed
+
+- Picking a song on the first page of a long queue gave an error: two of the card's buttons had the same id. Every card is now checked for that.
+- After a network blip, the panel stopped updating until the next song; it's put back up within seconds now.
+- "Loski, play …" plays the song right away (and so carries on after "Loski, stop"), instead of adding it to the end of a long queue. A co-DJ who may only add songs still queues it.
 
 - Plain `docker compose up -d` on Linux: Loski couldn't write to the `data` folder Docker created, so nothing was saved. Loski now hands the folder to its own user as it starts (to you, when `loski.sh` starts it).
 

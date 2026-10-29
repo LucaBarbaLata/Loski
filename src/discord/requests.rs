@@ -174,26 +174,54 @@ pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
             commands::enqueue(app, &core, target, vec![track], Placement::End, None, None).await?;
         return ix.reply_temp(vec![card], SHORT_SECS).await;
     }
+    let by_id = ix.user_id.map_or(0, |u| u.get());
+    may_ask(app, by_id)?;
+    ix.defer().await?;
+    let track = find_song(app, &cmd.song).await?;
+    let cover = track.cover_thumb_url.clone();
+    let text = ask(
+        app,
+        by_id,
+        ix.user_name.clone(),
+        track,
+        ix.id.get(),
+        ix.channel_id,
+    )
+    .await;
+    let card = cards::toast(&app.icons, &text, cover.as_deref(), color::SUCCESS);
+    ix.reply_temp(vec![card], SHORT_SECS).await
+}
+
+/// Whether `by_id` may ask for a song right now.
+pub(super) fn may_ask(app: &App, by_id: u64) -> Result<()> {
     if app.prefs().requests_off {
         return Err(oops("Song requests are off right now."));
     }
-    let by_id = ix.user_id.map_or(0, |u| u.get());
-    {
-        let mut st = app.requests.state.lock();
-        st.tidy();
-        if st.open.iter().filter(|r| r.by_id == by_id).count() >= MAX_OPEN {
-            return Err(oops(
-                "You have a few requests waiting already. Give them a moment.",
-            ));
-        }
-        if let Some(at) = st.last.get(&by_id)
-            && at.elapsed() < COOLDOWN
-        {
-            return Err(oops("One at a time. Try again in a few seconds."));
-        }
+    let mut st = app.requests.state.lock();
+    st.tidy();
+    if st.open.iter().filter(|r| r.by_id == by_id).count() >= MAX_OPEN {
+        return Err(oops(
+            "You have a few requests waiting already. Give them a moment.",
+        ));
     }
-    ix.defer().await?;
-    let track = find_song(app, &cmd.song).await?;
+    if let Some(at) = st.last.get(&by_id)
+        && at.elapsed() < COOLDOWN
+    {
+        return Err(oops("One at a time. Try again in a few seconds."));
+    }
+    Ok(())
+}
+
+/// Puts `track` on the requests card, asked for by `by`, and says so. The
+/// card goes up in `here` when it isn't anywhere yet.
+pub(super) async fn ask(
+    app: &Arc<App>,
+    by_id: u64,
+    by: String,
+    track: TrackInfo,
+    nonce: u64,
+    here: Option<Id<ChannelMarker>>,
+) -> String {
     let party = app.prefs().party;
     let text = format!(
         "Asked for **{}** by {}. {}",
@@ -205,27 +233,24 @@ pub async fn request(ix: &Ix, cmd: RequestCmd) -> Result<()> {
             "It's on the requests card now."
         }
     );
-    let cover = track.cover_thumb_url.clone();
     {
         let mut st = app.requests.state.lock();
         st.last.insert(by_id, Instant::now());
         st.open.push(Request {
-            nonce: ix.id.get(),
+            nonce,
             track,
-            by: ix.user_name.clone(),
+            by,
             by_id,
             asked_at: now_unix(),
             at: Instant::now(),
             votes: HashSet::from([by_id]),
         });
     }
-    let card = cards::toast(&app.icons, &text, cover.as_deref(), color::SUCCESS);
-    ix.reply_temp(vec![card], SHORT_SECS).await?;
-    redraw(app, ix.channel_id).await;
+    redraw(app, here).await;
     if party {
         party_turn(app).await;
     }
-    Ok(())
+    text
 }
 
 /// Every waiting request on one card. `picked` shows that one's buttons.

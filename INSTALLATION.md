@@ -18,7 +18,7 @@ Loski runs anywhere Docker does: your own computer, a server, a Raspberry Pi or 
 - **Spotify Premium.** Spotify only streams to Premium accounts.
 - **Docker.** Docker Desktop on Windows and macOS, Docker Engine with the Compose plugin on Linux ([docs.docker.com/engine/install](https://docs.docker.com/engine/install/)).
 - **A 64-bit computer.** Loski's image comes for `linux/amd64` (Intel and AMD) and `linux/arm64` (a Raspberry Pi 4 or 5, Apple Silicon, ARM servers). Docker picks the right one.
-- **For voice commands (optional):** an Intel or AMD processor with AVX2 (most from the last ten years) or a 64-bit ARM one, and 60 MB for the speech model, downloaded when you turn them on in `/voice`.
+- **For voice commands (optional):** an Intel or AMD processor with AVX2 (most from the last ten years) or a 64-bit ARM one, and 60 MB for the speech model (31 MB for the Quick one, for slower computers), downloaded when you turn them on in `/voice`. Talking back needs another 60 MB for its voice, downloaded when you pick one.
 - **Two sets of keys:** a Discord bot and a Spotify app. The setup page walks you through them, and so does [Your keys](#your-keys).
 
 ## Windows
@@ -100,7 +100,7 @@ Good to know on a server:
 
 ## Raspberry Pi
 
-A Pi 4 or 5 with a 64-bit OS (Raspberry Pi OS 64-bit, say) runs the ARM image. With a screen, follow [Linux](#linux). Without one, follow [A server or VPS](#a-server-or-vps): keys in `.env`, and the Spotify login through Discord. Voice commands work on a Pi too, but expect them to answer more slowly than on a PC.
+A Pi 4 or 5 with a 64-bit OS (Raspberry Pi OS 64-bit, say) runs the ARM image. With a screen, follow [Linux](#linux). Without one, follow [A server or VPS](#a-server-or-vps): keys in `.env`, and the Spotify login through Discord. Voice commands work on a Pi too, but answer more slowly than on a PC: pick the **Quick** speech model in `/voice` (31 MB), which `/voice` suggests when commands take a while to understand.
 
 ## A NAS, Portainer and friends
 
@@ -155,7 +155,7 @@ For your own changes:
   ./target/release/loski
   ```
 
-  It reads `.env` from the folder you run it in and keeps its data in `./data`.
+  It reads `.env` from the folder you run it in and keeps its data in `./data`. Talking back (voice commands) needs [Piper](https://github.com/rhasspy/piper/releases/tag/2023.11.14-2): unpack it and set `PIPER` to its `piper` program.
 
 ## First start
 
@@ -172,6 +172,19 @@ The same wherever Loski runs.
 **A Discord bot.** At [discord.com/developers/applications](https://discord.com/developers/applications), click **New Application** and name it what your bot should be called (Loski, say). Open **Bot**, click **Reset Token** and copy the token. No privileged intents are needed.
 
 **A Spotify app.** At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), click **Create app**, set the redirect URI to exactly `http://127.0.0.1:5588/callback`, tick **Web API**, and copy the **Client ID** and **Client Secret**. The redirect URI stays `127.0.0.1` even when Loski runs on a server.
+
+## Talking back with your graphics card
+
+The most natural voice for talking back (voice commands, beta) is [Chatterbox](https://github.com/resemble-ai/chatterbox), by Resemble AI. It runs on an NVIDIA graphics card, in a container of its own next to Loski that only Loski can reach. Without one, `/voice` offers simpler voices through Piper instead.
+
+- **What it needs:** an NVIDIA graphics card with about 5 GB of free memory (an RTX 30 series or newer is quick), Docker that can use it (on Windows, Docker Desktop with WSL 2 and a current NVIDIA driver; on Linux, the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)), and about 17 GB of disk: 13 GB for its image and 3 GB for its model.
+- **Turning it on:**
+  1. Add `COMPOSE_PROFILES=gpu-voice` to `.env`.
+  2. `.\loski build` (or `./loski.sh build`). The first time takes a while: it downloads PyTorch for the graphics card.
+  3. The first start also downloads the model (3 GB). After that it takes a minute or two to load each time; `docker logs loski-voice` says when it's ready.
+  4. In `/voice`, pick **Talking back: Chatterbox**.
+- **Turning it off:** take the line out of `.env`, then `docker rm -f loski-voice`.
+- **Good to know:** the usual replies are made ahead as it starts, so they come at once; ones with a song's name take a second or two. Chatterbox puts an inaudible watermark in what it says, which marks it as made by a machine.
 
 ## Updating
 

@@ -303,7 +303,23 @@ struct Inner {
     audience: Vec<u64>,
     /// Nobody's in the call: what plays now doesn't count as listened to.
     alone: bool,
+    /// How long Loski has played, anyone listening or not, on its way to
+    /// the store.
+    played_clock: PlayedClock,
 }
+
+/// Time played, counted each tick and saved about once a minute.
+#[derive(Default)]
+struct PlayedClock {
+    last: Option<Instant>,
+    /// The Unix hour the time below belongs to.
+    hour: i64,
+    ms: u64,
+    saved: Option<Instant>,
+}
+
+/// How often the time played is saved.
+const SAVE_PLAYED_EVERY: Duration = Duration::from_secs(60);
 
 pub struct Engine {
     inner: Mutex<Inner>,
@@ -369,6 +385,7 @@ impl Engine {
                 connect_up_next: Vec::new(),
                 audience: Vec::new(),
                 alone: false,
+                played_clock: PlayedClock::default(),
             }),
             mixer,
         });
@@ -392,6 +409,16 @@ impl Engine {
         });
 
         engine
+    }
+
+    /// Loski says something in the call (talking back): heard over the
+    /// music, while it's paused, or with nothing playing.
+    /// How long it takes, the music's fade before it included.
+    pub fn say(&self, mono: &[f32], rate: u32) -> Duration {
+        let mut g = self.inner.lock();
+        let took = g.mixer.say(mono, rate);
+        g.ensure_output_playing();
+        took
     }
 
     pub fn mixer(&self) -> Arc<Mixer> {
@@ -1387,7 +1414,37 @@ impl Inner {
         self.advance(true);
     }
 
+    /// Counts the time since the last tick if the music was playing, and
+    /// saves it now and then.
+    fn tick_played(&mut self) {
+        let now = Instant::now();
+        let playing = self.status == Status::Playing;
+        let clock = &mut self.played_clock;
+        if let Some(last) = clock.last.replace(now)
+            && playing
+        {
+            // A stall in between isn't playing time.
+            clock.ms += (now - last).min(Duration::from_secs(5)).as_millis() as u64;
+        }
+        let hour = crate::spotify::auth::now_unix() / 3600;
+        if clock.hour == 0 {
+            clock.hour = hour;
+        }
+        let due = hour != clock.hour
+            || clock
+                .saved
+                .is_none_or(|at| at.elapsed() >= SAVE_PLAYED_EVERY);
+        if clock.ms > 0 && due {
+            let (store, hour, ms) = (self.store.clone(), clock.hour, clock.ms);
+            tokio::task::spawn_blocking(move || store.add_played(hour, ms));
+            clock.ms = 0;
+            clock.saved = Some(now);
+        }
+        clock.hour = hour;
+    }
+
     fn on_tick(&mut self) {
+        self.tick_played();
         self.tick_listen();
         self.apply_pending_pause();
         self.tick_sleep();
